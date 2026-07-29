@@ -6,6 +6,8 @@ import torch.nn.functional as F
 
 from core import (
     term,
+    OpticalModule,
+    SystemBoolScalar,
     SystemFloatScalar,
     TraceFlow,
     Transformer,
@@ -58,6 +60,16 @@ class Gap(Component):
             trainable=term.THICKNESS.resolve(
                 term.TRAIN.resolve(options, default={}), default=False
             ),
+        )
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """逐个体选择厚度，trainable 语义从 *new* 继承。"""
+        OpticalModule._check_operands(mask, new, old)
+        return cls(
+            thickness=torch.where(mask, new.Thickness, old.Thickness),
+            trainable=bool(new.Thickness.requires_grad),
         )
 
     @override

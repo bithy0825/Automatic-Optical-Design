@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import torch
 from torch import nn
 
-from core import RayFloatScalar, SystemLongScalar, fmt_param, term
+from core import RayFloatScalar, SystemBoolScalar, SystemLongScalar, fmt_param, term
 from core.repr import render_line, render_tree, styled
 from materials.protocol import MaterialDatabase
 from materials.constant import ConstantMaterialDatabase
@@ -118,6 +118,22 @@ class Material(nn.Module):
         已被禁用。新 Material 持有克隆后的 indices，与其原对象互不干扰。
         """
         return Material(indices=self.Indices.clone(), database=self.database)
+
+    @classmethod
+    @torch.no_grad()
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """种群级个体选择：``mask=True`` 取 *new* 的玻璃编号，``False`` 取 *old*。
+
+        两操作数须共享同一 database 单例（同一 clone 谱系），database 从 *new* 继承。
+        """
+        if type(new) is not type(old) or new.database is not old.database:
+            raise TypeError("where: materials must share one database singleton")
+        if mask.dtype != torch.bool or mask.shape != (new.population,):
+            raise ValueError(
+                f"where: mask must be a ({new.population},) bool tensor, "
+                f"got shape={tuple(mask.shape)}, dtype={mask.dtype}"
+            )
+        return cls(indices=torch.where(mask, new.Indices, old.Indices), database=new.database)
 
     def forward(self, wavelength: RayFloatScalar) -> RayFloatScalar:
         return self.database(self.Indices, wavelength)

@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import torch
 
-from core import SystemFloatScalar, TraceFlow, term, parse_param
+from core import OpticalModule, SystemBoolScalar, SystemFloatScalar, TraceFlow, term, parse_param
 from component.protocol import Component
 from shape import Disk
 
@@ -39,6 +39,13 @@ class Sensor(Component):
     @override
     def from_options(cls, population: int, options: Mapping[str, Any]) -> Self:
         return cls(parse_param(options, term.DIAMETER, population))
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """逐个体选择传感面直径。"""
+        OpticalModule._check_operands(mask, new, old)
+        return cls(torch.where(mask, new.shape.Diameter, old.shape.Diameter))
 
     @override
     def clone(self) -> Self:

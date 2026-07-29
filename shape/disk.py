@@ -1,7 +1,11 @@
 from typing import Any, Self, override
 from collections.abc import Mapping
 
+import torch
+
 from core import (
+    OpticalModule,
+    SystemBoolScalar,
     SystemFloatScalar,
     term,
     parse_param,
@@ -37,6 +41,17 @@ class Disk(Shape):
             diameter=self.Diameter.clone(),
             solver_opts=self._solver_opts,
             trainable=self.trainable.copy(),
+        )
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """逐个体选择直径；求解器与 trainable 配置从 *new* 继承。"""
+        OpticalModule._check_operands(mask, new, old)
+        return cls(
+            diameter=torch.where(mask, new.Diameter, old.Diameter),
+            solver_opts=new._solver_opts,
+            trainable=new.trainable.copy(),
         )
 
     @classmethod

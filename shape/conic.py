@@ -2,7 +2,11 @@ from typing import Any, Self, override
 from collections.abc import Mapping
 import warnings
 
+import torch
+
 from core import (
+    OpticalModule,
+    SystemBoolScalar,
     SystemFloatScalar,
     init_param,
     term,
@@ -59,6 +63,19 @@ class Conic(Shape):
             kappa=self.Kappa.clone(),
             solver_opts=self._solver_opts,
             trainable=self.trainable.copy(),
+        )
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """逐个体选择直径、曲率与锥面常数；求解器与 trainable 配置从 *new* 继承。"""
+        OpticalModule._check_operands(mask, new, old)
+        return cls(
+            diameter=torch.where(mask, new.Diameter, old.Diameter),
+            curvature=torch.where(mask, new.Curvature, old.Curvature),
+            kappa=torch.where(mask, new.Kappa, old.Kappa),
+            solver_opts=new._solver_opts,
+            trainable=new.trainable.copy(),
         )
 
     @classmethod

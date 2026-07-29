@@ -2,7 +2,7 @@ from typing import Any, Self, override
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 
-from core import SystemLongScalar, TraceFlow, fmt_param, term
+from core import OpticalModule, SystemBoolScalar, SystemLongScalar, TraceFlow, fmt_param, term
 from component.protocol import Component
 from materials import Material, MaterialRef
 from physics import refract
@@ -78,6 +78,21 @@ class Refractor(Component):
         return cls(
             shape=Shape.from_options(population, options),
             transmitted=Material.from_options(population, options),
+        )
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """shape 多态分派、transmitted 经 ``Material.where`` 合并；
+        ``incident`` 留空，由链式容器 rebind（语义同 ``clone``）。"""
+        OpticalModule._check_operands(mask, new, old)
+        if type(new.shape) is not type(old.shape):
+            raise TypeError(
+                f"where: shape {type(new.shape).__name__} vs {type(old.shape).__name__}"
+            )
+        return cls(
+            shape=type(new.shape).where(mask, new.shape, old.shape),
+            transmitted=Material.where(mask, new.transmitted, old.transmitted),
         )
 
     @override

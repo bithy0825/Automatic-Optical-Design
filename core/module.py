@@ -6,7 +6,7 @@ from itertools import chain
 import torch
 from torch import nn
 
-from core.aliases import SystemLongScalar
+from core.aliases import SystemBoolScalar, SystemLongScalar
 from core.noun import Noun
 from core.repr import render_tree, styled
 from core.utils import fmt_param
@@ -17,9 +17,15 @@ class OpticalModule(nn.Module, ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        for name in ("sort", "breed", "mutate", "clone"):
-            if name in cls.__dict__:
-                setattr(cls, name, torch.no_grad()(cls.__dict__[name]))
+        for name in ("sort", "breed", "mutate", "clone", "where"):
+            if name not in cls.__dict__:
+                continue
+            attr = cls.__dict__[name]
+            if isinstance(attr, classmethod):
+                # classmethod 对象不可调用，须包装其 __func__ 再重新包回
+                setattr(cls, name, classmethod(torch.no_grad()(attr.__func__)))
+            else:
+                setattr(cls, name, torch.no_grad()(attr))
 
     # ------------------------------------------------------------------
     # 抽象契约
@@ -100,6 +106,46 @@ class OpticalModule(nn.Module, ABC):
             tensor = getattr(self, noun.canonical)
             noise = torch.randn_like(tensor[indices]).mul(std)
             tensor.index_put_((indices,), noise, accumulate=True)
+
+    @classmethod
+    @torch.no_grad()
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """种群级个体选择：``mask=True`` 取 *new*，``False`` 取 *old*，两边均不被修改。
+
+        默认实现克隆 *new* 后把 ``~mask`` 行从 *old* 逐批量张量回写。子类可覆盖为
+        逐字段 ``torch.where`` 直构（镜像各自 ``clone`` 的字段清单），约定：非张量
+        共享配置（求解器选项、照明配置等）从 *new* 继承；多维参数（如 ``(P, N)``
+        的 Alpha）对 mask 自行升维广播。
+        """
+        OpticalModule._check_operands(mask, new, old)
+        merged = new.clone()
+        reject = (~mask).nonzero().squeeze(-1)
+        if reject.numel():
+            mine = list(merged._batched_tensors())
+            theirs = list(old._batched_tensors())
+            assert [n for n, _ in mine] == [n for n, _ in theirs], "module trees differ"
+            for (_, t), (_, o) in zip(mine, theirs):
+                t.index_copy_(0, reject, o.index_select(0, reject))
+        return merged
+
+    @staticmethod
+    def _check_operands(
+        mask: SystemBoolScalar, new: "OpticalModule", old: "OpticalModule"
+    ) -> None:
+        """``where`` 操作数校验：同类型、同种群、mask 为 ``(P,)`` bool。"""
+        if type(new) is not type(old):
+            raise TypeError(
+                f"where: {type(new).__name__} vs {type(old).__name__}"
+            )
+        if new.population != old.population:
+            raise ValueError(
+                f"where: population {new.population} vs {old.population}"
+            )
+        if mask.dtype != torch.bool or mask.shape != (new.population,):
+            raise ValueError(
+                f"where: mask must be a ({new.population},) bool tensor, "
+                f"got shape={tuple(mask.shape)}, dtype={mask.dtype}"
+            )
 
     def __getitem__(self, key: Noun) -> torch.Tensor:
         return getattr(self, key.canonical)

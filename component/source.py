@@ -6,10 +6,12 @@ import torch.nn.functional as F
 from jaxtyping import Float
 
 from core import (
+    OpticalModule,
     RayFloat2D,
     RayFloat3D,
     RayFloatScalar,
     RayBundle,
+    SystemBoolScalar,
     TraceFlow,
     Transformer,
     Verdict,
@@ -287,6 +289,24 @@ class InfiniteSource(Component):
         wavelength_out = wavelength.view(1, 1, w, 1).expand(B, f, w, n)
 
         return P, V, pupil_out, field_out, wavelength_out
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """照明配置（epd/视场/波长/采样）为种群共享配置，从 *new* 继承；
+        唯一逐个体状态 ``transmitted`` 经 ``Material.where`` 合并。"""
+        OpticalModule._check_operands(mask, new, old)
+        return cls(
+            epd=new.epd,
+            field_x=new.field_x,
+            field_y=new.field_y,
+            wavelength=new.wavelengths,
+            population=new.population,
+            pupil_cfg=new.pupil_cfg,
+            field_cfg=new.field_cfg,
+            wavel_cfg=new.wavel_cfg,
+            transmitted=Material.where(mask, new.transmitted, old.transmitted),
+        )
 
     @classmethod
     @override

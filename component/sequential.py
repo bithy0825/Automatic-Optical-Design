@@ -3,7 +3,7 @@ from typing import Any, Self, cast, override
 
 from torch import nn
 
-from core import Noun, SystemLongScalar, TraceFlow, term
+from core import Noun, OpticalModule, SystemBoolScalar, SystemLongScalar, TraceFlow, term
 from core.repr import styled
 from component.protocol import Component
 from component.refractor import Refractor
@@ -118,6 +118,22 @@ class Sequential(Component):
             )
         for comp, opts in zip(self, options, strict=True):
             comp.mutate(indices, term.MUTATE.resolve(opts, default={}))
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """逐元件多态分派各自的 ``where``（命中子类实现或基类默认），随后 rebind。"""
+        OpticalModule._check_operands(mask, new, old)
+        components: list[Component] = []
+        for n, o in zip(new, old, strict=True):
+            if type(n) is not type(o):
+                raise TypeError(
+                    f"where: component {type(n).__name__} vs {type(o).__name__}"
+                )
+            components.append(type(n).where(mask, n, o))
+        seq = cls(*components)
+        seq.rebind()
+        return cast(Self, seq)
 
     @override
     def clone(self) -> Self:

@@ -6,6 +6,8 @@ import torch
 
 from core import (
     Noun,
+    OpticalModule,
+    SystemBoolScalar,
     SystemFloatScalar,
     SystemFloatND,
     SystemLongScalar,
@@ -138,6 +140,22 @@ class Asphere(Shape):
             mask=self.Mask.clone(),
             solver_opts=self._solver_opts,
             trainable=self.trainable.copy(),
+        )
+
+    @classmethod
+    @override
+    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+        """逐个体选择各面形参数；``Alpha`` 为 ``(P, N)``，mask 升维广播。
+        求解器与 trainable 配置从 *new* 继承。"""
+        OpticalModule._check_operands(mask, new, old)
+        return cls(
+            diameter=torch.where(mask, new.Diameter, old.Diameter),
+            curvature=torch.where(mask, new.Curvature, old.Curvature),
+            kappa=torch.where(mask, new.Kappa, old.Kappa),
+            alpha=torch.where(mask.unsqueeze(-1), new.Alpha, old.Alpha),
+            mask=torch.where(mask, new.Mask, old.Mask),
+            solver_opts=new._solver_opts,
+            trainable=new.trainable.copy(),
         )
 
     @classmethod
