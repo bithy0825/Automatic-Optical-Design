@@ -56,6 +56,14 @@ HIGH: Final = Noun.for_key("High", "high")
 TRAIN: Final = Noun.for_key("Train", "train")
 INDEX: Final = Noun.for_key("Index", "index")
 INDICES: Final = Noun.for_key("Indices", "indices")
+# ── 损失与裁决死因（LossWeights 键） ──
+LOSS: Final = Noun.for_key("Loss", "loss")
+SPOT: Final = Noun.for_key("Spot", "spot")
+SAG_DOMAIN: Final = Noun.for_key("Sag_Domain", "sag_domain")
+SOLVER_NEGATIVE: Final = Noun.for_key("Solver_Negative", "solver_negative")
+SOLVER_CONVERGENCE: Final = Noun.for_key("Solver_Convergence", "solver_convergence")
+APERTURE_CLIP: Final = Noun.for_key("Aperture_Clip", "aperture_clip")
+TIR: Final = Noun.for_key("TIR", "tir")
 
 # ── 元件种类（Component.kind） ──
 SOURCE: Final = Noun.for_key("Source", "source")

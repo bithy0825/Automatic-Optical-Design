@@ -148,7 +148,16 @@ class OpticalModule(nn.Module, ABC):
             )
 
     def __getitem__(self, key: Noun) -> torch.Tensor:
-        return getattr(self, key.canonical)
+        """按名词导出参数张量（边界损失数据口）；自身无该属性时下钻子模块查找。"""
+        canonical = key.canonical
+        if hasattr(self, canonical):
+            return getattr(self, canonical)
+        for child in self.children():
+            if hasattr(child, canonical):
+                return getattr(child, canonical)
+        raise AttributeError(
+            f"{type(self).__name__} has no parameter {canonical!r} (children searched)"
+        )
 
     # ------------------------------------------------------------------
     # 打印

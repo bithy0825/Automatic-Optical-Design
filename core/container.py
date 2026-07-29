@@ -21,7 +21,9 @@ class TensorContainer:
         def show(v: object) -> object:
             return tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__
 
-        info = ", ".join(f"{f.name}={show(getattr(self, f.name))}" for f in fields(self))
+        info = ", ".join(
+            f"{f.name}={show(getattr(self, f.name))}" for f in fields(self)
+        )
         return render_line(styled(type(self).__name__, info))
 
     def apply(self, func: Callable[[torch.Tensor], torch.Tensor]) -> Self:
@@ -53,3 +55,18 @@ class TensorContainer:
 
     def replace(self, **kwargs: object) -> Self:
         return replace(self, **kwargs)
+
+    @property
+    def device(self) -> torch.device:
+        for f in fields(self):
+            value = getattr(self, f.name)
+            return value.device
+        raise RuntimeError(f"{type(self).__name__} has no tensor fields")
+
+    @property
+    def dtype(self) -> torch.dtype:
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                return value.dtype
+        raise RuntimeError(f"{type(self).__name__} has no floating-point tensor fields")

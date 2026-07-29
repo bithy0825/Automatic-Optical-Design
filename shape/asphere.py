@@ -128,7 +128,7 @@ class Asphere(Shape):
         # ALPHA 导出 mask 屏蔽后的有效系数（边界损失不惩罚无效尾部），梯度链保留。
         if key == term.ALPHA:
             return self._active_alpha()
-        return getattr(self, key.canonical)
+        return super().__getitem__(key)
 
     @override
     def clone(self) -> Self:

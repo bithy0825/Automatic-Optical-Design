@@ -17,6 +17,11 @@ grad_norm = 10.0
 default = { lr = 1e-3 }
 lr = {}
 
+[loss]
+effl = 1.0
+spot = 1.0
+
+
 # --- surface 0: source ---
 [[component]]
 type = "source"
