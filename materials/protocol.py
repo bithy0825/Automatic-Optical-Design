@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from core import Noun, RayFloatScalar, SystemLongScalar
+from core.repr import render_tree, styled
 
 
 class MaterialDatabase(nn.Module, ABC):
@@ -137,3 +138,12 @@ class MaterialDatabase(nn.Module, ABC):
     def __contains__(self, name: str) -> bool:
         """检查材料名称是否在数据库中。"""
         return name in self.name_to_index
+
+    def _label(self) -> str:
+        return styled(
+            type(self).__name__,
+            f"{len(self)} materials, {self.device}, {self.dtype}",
+        )
+
+    def __repr__(self) -> str:
+        return render_tree(self)

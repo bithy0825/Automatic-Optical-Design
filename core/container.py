@@ -12,9 +12,18 @@ from typing import Self
 
 import torch
 
+from core.repr import render_line, styled
+
 
 @dataclass(slots=True, eq=False)
 class TensorContainer:
+    def __repr__(self) -> str:
+        def show(v: object) -> object:
+            return tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__
+
+        info = ", ".join(f"{f.name}={show(getattr(self, f.name))}" for f in fields(self))
+        return render_line(styled(type(self).__name__, info))
+
     def apply(self, func: Callable[[torch.Tensor], torch.Tensor]) -> Self:
         """对每个张量字段应用 *func*，返回同类型的新容器（嵌套容器递归）。"""
         kwargs = {}

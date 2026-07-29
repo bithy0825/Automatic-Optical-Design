@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 
 from core import RayFloat3D, Verdict
+from core.container import TensorContainer
 
 
-@dataclass(slots=True, eq=False)
-class InteractionResult:
+@dataclass(slots=True, eq=False, repr=False)
+class InteractionResult(TensorContainer):
     """光线与表面相互作用的结果。
 
     Attributes:

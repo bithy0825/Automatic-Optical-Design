@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from core import (
     SystemFloatScalar,
     term,
-    fmt_param,
     parse_param,
 )
 from implicit import (
@@ -31,9 +30,6 @@ class Disk(Shape):
     @override
     def sag(self) -> SagFunction:
         return flat_sag()
-
-    def extra_repr(self) -> str:
-        return f"{term.DIAMETER.canonical}={fmt_param(self.Diameter)},\n"
 
     @override
     def clone(self) -> Self:

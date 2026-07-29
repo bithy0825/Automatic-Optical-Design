@@ -6,7 +6,6 @@ from core import (
     SystemFloatScalar,
     init_param,
     term,
-    fmt_param,
     parse_param,
 )
 from implicit import (
@@ -15,7 +14,6 @@ from implicit import (
     conical_sag,
 )
 from shape.protocol import Shape
-from shape._utils import fmt_curv_pair
 
 
 class Conic(Shape):
@@ -52,13 +50,6 @@ class Conic(Shape):
     @override
     def sag(self) -> SagFunction:
         return conical_sag(self.Curvature, self.Kappa)
-
-    def extra_repr(self) -> str:
-        return (
-            f"{term.DIAMETER.canonical}={fmt_param(self.Diameter)},\n"
-            f"{fmt_curv_pair(self.Curvature)},\n"
-            f"{term.KAPPA.canonical}={fmt_param(self.Kappa)}"
-        )
 
     @override
     def clone(self) -> Self:

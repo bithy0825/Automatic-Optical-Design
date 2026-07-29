@@ -7,7 +7,7 @@ from core.transformer import Transformer
 from core.verdict import Verdict
 
 
-@dataclass(slots=True, eq=False)
+@dataclass(slots=True, eq=False, repr=False)
 class TraceFlow(TensorContainer):
     """在元件间流动的追迹状态：光线束 + 当前位姿 + 累计裁决。"""
 

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from core import term
+from core.repr import render_line, styled
 
 type FOV = float | tuple[float, float] | tuple[tuple[float, float], tuple[float, float]]
 
@@ -90,11 +91,10 @@ class Target:
         return self.effl / self.F
 
     def __repr__(self) -> str:
-        return (
-            f"Target({term.ID}: {self.id!r}, "
-            f"{term.FOV}: {self.fov!r}, "
-            f"{term.F_NUMBER}: {self.F:g}, "
-            f"{term.EFFL}: {self.effl:g}, "
-            f"{term.EPD}: {self.effl:g}, "
-            f"{term.WAVELENGTH}: {self.wavelengths!r})"
+        return render_line(
+            styled(
+                "Target",
+                f"id={self.id!r}, fov={self.fov!r}, F={self.F:g}, "
+                f"effl={self.effl:g}, epd={self.epd:g}, λ={self.wavelengths!r}",
+            )
         )

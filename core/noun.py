@@ -3,6 +3,8 @@ from collections.abc import Callable, Iterator, Mapping
 from functools import partial
 from typing import Any, Final, Self
 
+from core.repr import render_line, styled
+
 _MISSING: Final = object()  # resolve() 的"未提供 default"哨兵（区别于 default=None）
 
 
@@ -56,8 +58,7 @@ class Noun:
         return self._canonical
 
     def __repr__(self) -> str:
-        args = ", ".join(map(repr, self._all_names))
-        return f"{type(self).__name__}({args})"
+        return render_line(styled("Noun", ", ".join(map(repr, self._all_names))))
 
     def __hash__(self) -> int:
         return self._hash

@@ -10,7 +10,7 @@ from core.aliases import HomMatrix, SystemFloat3D, SystemFloatScalar, RayFloat3D
 from core.container import TensorContainer
 
 
-@dataclass(slots=True, eq=False)
+@dataclass(slots=True, eq=False, repr=False)
 class Transformer(TensorContainer):
     forward: HomMatrix
     inverse: HomMatrix

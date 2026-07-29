@@ -5,7 +5,7 @@ from core.aliases import RayFloat2D, RayFloat3D, RayFloatScalar
 from core.container import TensorContainer
 
 
-@dataclass(slots=True, eq=False)
+@dataclass(slots=True, eq=False, repr=False)
 class RayBundle(TensorContainer):
     """一束光线：起点、方向与逐光线标签（光瞳坐标 / 视场 / 波长）。"""
 

@@ -1,8 +1,8 @@
 from typing import Any, Self, override
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 
-from core import SystemLongScalar, TraceFlow, term
+from core import SystemLongScalar, TraceFlow, fmt_param, term
 from component.protocol import Component
 from materials import Material, MaterialRef
 from physics import refract
@@ -29,6 +29,16 @@ class Refractor(Component):
         self.shape = shape
         self.transmitted = transmitted
         self.incident = incident
+
+    @override
+    def _params(self) -> Iterator[str]:
+        incident = (
+            fmt_param(self.incident.names())
+            if self.incident is not None
+            else "(unbound)"
+        )
+        yield f"incident: {incident}"
+        yield f"transmitted: {fmt_param(self.transmitted.names())}"
 
     def bind_incident(self, transmitted_prev: Material) -> None:
         """绑定上游入射材料（可选，若不绑定则折射器无法工作）。"""

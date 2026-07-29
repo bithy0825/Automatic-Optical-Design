@@ -4,22 +4,25 @@ from typing import Any, Self, cast, override
 from torch import nn
 
 from core import Noun, SystemLongScalar, TraceFlow, term
+from core.repr import styled
 from component.protocol import Component
 from component.refractor import Refractor
 from component.sensor import Sensor
 from component.source import InfiniteSource
 from materials import Material
 from shape import Shape
-from component._repr import repr_sequential
 
 FlowCallback = Callable[[Component, TraceFlow, int], TraceFlow]
 
 
 class Sequential(Component):
+    """按序级联的光学系统。``flow=None`` 发流时首元件必须是 Source。"""
+
     kind = term.SEQUENTIAL
 
-    def __repr__(self) -> str:
-        return repr_sequential(self)
+    @override
+    def _label(self) -> str:
+        return styled("Sequential", f"{len(self)} surfaces, P={self.population}")
 
     def __init__(self, *components: Component) -> None:
         super().__init__()

@@ -9,7 +9,6 @@ from core import (
     SystemFloatScalar,
     TraceFlow,
     Transformer,
-    fmt_param,
     init_param,
     parse_param,
 )
@@ -48,9 +47,6 @@ class Gap(Component):
         t = self.Thickness.to(device=tf.device, dtype=tf.dtype)
         step = F.pad(t.unsqueeze(-1), (2, 0))  # (P, 3) = (0, 0, t)
         return flow.with_transformer(tf.then(Transformer.translation(step)))
-
-    def extra_repr(self) -> str:
-        return f"{term.THICKNESS.canonical}={fmt_param(self.Thickness)}"
 
     @classmethod
     @override

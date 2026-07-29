@@ -12,11 +12,12 @@ from core import (
     Verdict,
     broadcast_system_to_ray,
 )
+from core.container import TensorContainer
 from implicit import FieldResult, ImplicitFunction, SolverFunction
 
 
-@dataclass(slots=True, eq=False)
-class TraceResult:
+@dataclass(slots=True, eq=False, repr=False)
+class TraceResult(TensorContainer):
     """光线与单一曲面相交的结果（``Shape.forward`` 的产物）。
 
     Attributes:

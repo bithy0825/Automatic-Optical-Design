@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from core import RayFloatScalar, SystemLongScalar, fmt_param, term
+from core.repr import render_line, render_tree, styled
 from materials.protocol import MaterialDatabase
 from materials.constant import ConstantMaterialDatabase
 from materials.sellmeier import SellmeierMaterialDatabase
@@ -151,8 +152,11 @@ class Material(nn.Module):
         new_selected = self.database.mutate(selected, std, generator)
         self.Indices.index_put_((indices,), new_selected)
 
-    def extra_repr(self) -> str:
-        return f"{term.MATERIAL.canonical}={fmt_param(self.names())}"
+    def _label(self) -> str:
+        return styled("Material", fmt_param(self.names()))
+
+    def __repr__(self) -> str:
+        return render_tree(self)
 
     def __copy__(self):
         raise RuntimeError("Material is an owned mutable object")
@@ -180,7 +184,7 @@ class MaterialRef:
     _material: Material
 
     def __repr__(self) -> str:
-        return f"MaterialRef({self._material})"
+        return render_line(styled("MaterialRef", fmt_param(self.names())))
 
     @classmethod
     def from_material(cls, material: Material) -> Self:

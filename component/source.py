@@ -1,5 +1,5 @@
 from typing import override, Self, Any
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -13,9 +13,11 @@ from core import (
     TraceFlow,
     Transformer,
     Verdict,
+    fmt_param,
     term,
 )
 from component.protocol import Component
+from core.repr import styled
 from materials import Material
 from sampling import SampleOptions, sample
 
@@ -188,11 +190,17 @@ class InfiniteSource(Component):
         self.field_y = _normalize_angle_range(field_y, name="field_y")
         self.wavelengths = _normalize_wavelengths(wavelength)
 
-    def extra_repr(self) -> str:
-        return (
-            f"{term.EPD.canonical}={self.epd}, {term.FOV.canonical}_X={self.field_x}, {term.FOV.canonical}_Y={self.field_y}, "
-            f"{term.WAVELENGTH.canonical}={self.wavelengths}, {term.POPULATION.canonical}={self.population}"
+    @override
+    def _label(self) -> str:
+        return styled(
+            "InfiniteSource",
+            f"epd={self.epd}, fov_x={self.field_x}, fov_y={self.field_y}, "
+            f"λ={self.wavelengths}, P={self.population}",
         )
+
+    @override
+    def _params(self) -> Iterator[str]:
+        yield f"transmitted: {fmt_param(self.transmitted.names())}"
 
     @override
     def forward(self, flow: TraceFlow | None = None) -> TraceFlow:

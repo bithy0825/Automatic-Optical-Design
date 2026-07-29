@@ -20,7 +20,7 @@ from core.aliases import RayBoolScalar, RayFloatScalar, RayLongScalar
 from core.container import TensorContainer
 
 
-@dataclass(slots=True, eq=False)
+@dataclass(slots=True, eq=False, repr=False)
 class Verdict(TensorContainer):
     class Cause(IntEnum):
         NONE = 0  # 无异常

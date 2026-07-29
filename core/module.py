@@ -1,12 +1,15 @@
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, Self
 from collections.abc import Iterator, Mapping, Sequence
+from itertools import chain
 
 import torch
 from torch import nn
 
 from core.aliases import SystemLongScalar
 from core.noun import Noun
+from core.repr import render_tree, styled
+from core.utils import fmt_param
 
 
 class OpticalModule(nn.Module, ABC):
@@ -100,6 +103,28 @@ class OpticalModule(nn.Module, ABC):
 
     def __getitem__(self, key: Noun) -> torch.Tensor:
         return getattr(self, key.canonical)
+
+    # ------------------------------------------------------------------
+    # 打印
+    # ------------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        return render_tree(self)
+
+    def _label(self) -> str:
+        """树节点标签行（子类按需覆盖，如 Sequential 的头部信息）。"""
+        return styled(type(self).__name__)
+
+    def _params(self) -> Iterator[str]:
+        """树节点名下的参数行：每个注册参数/buffer 一行（子类按需覆盖）。"""
+        for name, t in chain(
+            self.named_parameters(recurse=False),
+            self.named_buffers(recurse=False),
+        ):
+            if t.ndim == 1:
+                yield f"{name}={fmt_param(t)}"
+            else:
+                yield f"{name}={tuple(t.shape)}"
 
     # ------------------------------------------------------------------
     # 内部工具

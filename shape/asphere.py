@@ -11,12 +11,10 @@ from core import (
     SystemLongScalar,
     init_param,
     term,
-    fmt_param,
     parse_param,
 )
 from implicit import NewtonSolverOptions, SagFunction, aspheric_sag
 from shape.protocol import Shape
-from shape._utils import fmt_curv_pair, fmt_alpha_phys
 
 
 class Asphere(Shape):
@@ -82,15 +80,6 @@ class Asphere(Shape):
         alpha = self._active_alpha()
         radius = self.Diameter.mul(0.5)
         return aspheric_sag(self.Curvature, self.Kappa, alpha, radius)
-
-    def extra_repr(self) -> str:
-        radius = self.Diameter.mul(0.5)
-        return (
-            f"{term.DIAMETER.canonical}={fmt_param(self.Diameter)},\n"
-            f"{fmt_curv_pair(self.Curvature)},\n"
-            f"{term.KAPPA.canonical}={fmt_param(self.Kappa)},\n"
-            f"{fmt_alpha_phys(self._active_alpha(), radius)},\n"
-        )
 
     def _jitter(self, key: Noun, indices: SystemLongScalar, std: float) -> None:
         if std == 0:
