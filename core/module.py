@@ -1,0 +1,149 @@
+from abc import ABC, abstractmethod
+from typing import Any, ClassVar, Self
+from collections.abc import Iterator, Mapping, Sequence
+
+import torch
+from torch import nn
+
+from core.aliases import SystemLongScalar
+from core.noun import Noun
+
+
+class OpticalModule(nn.Module, ABC):
+    mutable: ClassVar[tuple[Noun, ...]] = ()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        for name in ("sort", "breed", "mutate", "clone"):
+            if name in cls.__dict__:
+                setattr(cls, name, torch.no_grad()(cls.__dict__[name]))
+
+    # ------------------------------------------------------------------
+    # 抽象契约
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        """业务入口。语义由子类定义（如 ``Component.forward`` 消费并产出
+        ``TraceFlow``，``Shape.forward`` 返回 ``TraceResult``）。"""
+
+    @classmethod
+    @abstractmethod
+    def from_options(cls, population: int, options: Mapping[str, Any]) -> Self:
+        """从配置映射构造 *population* 个个体的种群。"""
+
+    @abstractmethod
+    def clone(self) -> Self:
+        """深拷贝：生成与本体互不干扰的独立个体（GA 演化所需）。"""
+
+    # ------------------------------------------------------------------
+    # 派生属性
+    # ------------------------------------------------------------------
+
+    @property
+    def device(self) -> torch.device:
+        for t in self.parameters():
+            return t.device
+        for t in self.buffers():
+            return t.device
+        return torch.get_default_device()
+
+    @property
+    def dtype(self) -> torch.dtype:
+        for t in self.parameters():
+            return t.dtype
+        for t in self.buffers():
+            if t.is_floating_point():
+                return t.dtype
+        return torch.get_default_dtype()
+
+    @property
+    def population(self) -> int:
+        """首个参数/buffer 的批量维大小（P）；无参数时抛错。"""
+        for t in self.parameters():
+            return t.shape[0]
+        for t in self.buffers():
+            return t.shape[0]
+        raise RuntimeError(f"{type(self).__name__} has no batched parameters")
+
+    # ------------------------------------------------------------------
+    # GA 演化操作（默认实现，子类按需覆盖）
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def sort(self, order: SystemLongScalar) -> None:
+        """按 *order* 重排所有批量张量（含子模块）。"""
+        for _name, t in self._batched_tensors():
+            t.copy_(t.index_select(0, order))
+
+    @torch.no_grad()
+    def breed(self, topk: int) -> None:
+        """用前 *topk* 个精英滚动复制填充整个种群。"""
+        assert 0 < topk <= self.population, (
+            f"topk must be in (0, {self.population}], got {topk}"
+        )
+        idx = torch.arange(self.population - topk, device=self.device).remainder(topk)
+        for _name, t in self._batched_tensors():
+            t[topk:].copy_(t[:topk][idx])
+
+    @torch.no_grad()
+    def mutate(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
+        """对指定索引的个体做高斯扰动（按 ``mutable`` 词表逐项取标准差，
+        缺省或为零则跳过）。"""
+        for noun in self.mutable:
+            std = noun.resolve(options, default=0.0)
+            if std == 0.0:
+                continue
+            tensor = getattr(self, noun.canonical)
+            noise = torch.randn_like(tensor[indices]).mul(std)
+            tensor.index_put_((indices,), noise, accumulate=True)
+
+    def __getitem__(self, key: Noun) -> torch.Tensor:
+        return getattr(self, key.canonical)
+
+    # ------------------------------------------------------------------
+    # 内部工具
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _reorder(self, name: str | Noun, order: SystemLongScalar) -> None:
+        key = name.canonical if isinstance(name, Noun) else name
+        val = getattr(self, key)
+        val.copy_(val.index_select(0, order))
+
+    def _batched_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """递归产生批量维为 P 的 (名称, 张量)（含子模块的参数与 buffer）。"""
+        P = self.population
+        for name, param in self.named_parameters():
+            if param.shape[0] == P:
+                yield name, param
+        for name, buffer in self.named_buffers():
+            if buffer.shape[0] == P:
+                yield name, buffer
+
+
+def init_param(
+    parent: nn.Module,
+    name: str | Noun,
+    value: float | Sequence[float] | torch.Tensor,
+    trainable: bool = False,
+) -> torch.Tensor:
+    key = name.canonical if isinstance(name, Noun) else name
+
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach()
+    else:
+        first_param = next(parent.parameters(), None)
+        device = (
+            first_param.device
+            if first_param is not None
+            else torch.get_default_device()
+        )
+        tensor = torch.tensor(value, device=device)
+
+    if trainable:
+        param = nn.Parameter(tensor)
+        parent.register_parameter(key, param)
+        return param
+    parent.register_buffer(key, tensor)
+    return tensor

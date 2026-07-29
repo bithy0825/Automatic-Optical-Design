@@ -1,0 +1,7 @@
+[tool.ruff.lint.per-file-ignores]
+# jaxtyping 维度串注解（如 Float[Tensor, "B F W N"]）会误触 F722/F821
+"core/aliases.py" = ["F722", "F821"]
+"sampling/_core.py" = ["F722", "F821"]
+"component/source.py" = ["F722", "F821"]
+[tool.ruff.lint]
+ignore = ["I001"]
