@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Self
+from collections.abc import Mapping
 
 from core import term
 from core.repr import render_line, styled
@@ -55,15 +56,17 @@ class Target:
     wavelengths: list[float]  # nm
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        fov = _parse_fov(term.FOV.resolve(data))
-        F = float(term.F_NUMBER.resolve(data))
-        effl = float(term.EFFL.resolve(data))
+    def from_options(cls, options: Mapping[str, float]) -> Self:
+        fov = _parse_fov(term.FOV.resolve(options))
+        F = float(term.F_NUMBER.resolve(options))
+        effl = float(term.EFFL.resolve(options))
 
-        wavelengths = [float(w) for w in term.WAVELENGTH.resolve(data, default=[550.0])]
+        wavelengths = [
+            float(w) for w in term.WAVELENGTH.resolve(options, default=[550.0])
+        ]
 
         id = term.ID.resolve(
-            data,
+            options,
             default=f"fov_{_fov_name(fov)}_F_{F:g}_effl_{effl:g}",
         )
 

@@ -7,16 +7,32 @@ from component import Sequential
 from optimization.target import Target
 
 
-def build_sequential(cfg: Mapping[str, Any] | str) -> Sequential:
+def load_config(path: str) -> dict[str, Any]:
+    """从 TOML 文件加载配置。"""
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+    if not isinstance(cfg, Mapping):
+        raise TypeError(f"Invalid configuration: {cfg!r}")
+    return cfg
+
+
+def build_target(cfg: Mapping[str, Any]) -> Target:
+    """从配置构造目标光学系统。"""
+    target_ = term.TARGET.resolve(cfg)
+    return Target.from_options(target_)
+
+
+def build_sequential(
+    cfg: Mapping[str, Any] | str, target: Target | None = None
+) -> Sequential:
     if isinstance(cfg, str):
-        with open(cfg, "rb") as f:
-            cfg = tomllib.load(f)
+        cfg = load_config(cfg)
 
     if not isinstance(cfg, Mapping):
         raise TypeError(f"Invalid configuration: {cfg!r}")
 
-    target_ = term.TARGET.resolve(cfg)
-    target = Target.from_dict(target_)
+    if target is None:
+        target = build_target(cfg)
 
     components_ = term.COMPONENT.resolve(cfg)
     for i, comp in enumerate(components_):
