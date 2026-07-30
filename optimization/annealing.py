@@ -51,12 +51,13 @@ class SimulatedAnnealing:
             flow = seq()
             current, _ = total_loss(flow, seq, target, blocks, weights)
 
+        all_idx = torch.arange(seq.population, device=seq.device)
         for step_m1 in range(opts.step):
             progress = (step_m1 + 1) / opts.step
             T = self._temperature(progress)
 
             trial = seq.clone()
-            trial.mutate(torch.arange(seq.population), blocks)
+            trial.mutate_(all_idx, blocks)
 
             with torch.no_grad():
                 flow = trial()
@@ -64,9 +65,9 @@ class SimulatedAnnealing:
 
             accept = current.sub(trial_loss).div(T).exp().clamp_max(1.0)
             accept = accept.gt(torch.rand_like(accept))
-            new_seq = Sequential.where(accept, trial, seq)
-            seq.components = new_seq.components
-            seq.rebind()
+            # 原地择优：组件对象（Parameter / Material / MaterialRef 链）身份不变，
+            # 梯度优化器的参数绑定跨代保持有效；纯张量值回写，无需 rebind。
+            seq.where_(accept, trial)
             current = torch.where(accept, trial_loss, current)
 
             if callbacks:

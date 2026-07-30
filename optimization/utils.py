@@ -34,12 +34,13 @@ def build_sequential(
     if target is None:
         target = build_target(cfg)
 
-    components_ = term.COMPONENT.resolve(cfg)
-    for i, comp in enumerate(components_):
-        if term.SOURCE.match(term.TYPE.resolve(comp)):
-            components_[i] = {**components_[i], **target.to_dict()}
-
-    components = components_
+    target_spec = target.to_dict()
+    components = [
+        {**comp, **target_spec}
+        if term.SOURCE.match(term.TYPE.resolve(comp))
+        else comp
+        for comp in term.COMPONENT.resolve(cfg)
+    ]
 
     population = term.POPULATION.resolve(term.GA.resolve(cfg))
 

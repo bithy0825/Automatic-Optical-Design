@@ -91,7 +91,7 @@ class Asphere(Shape):
         tensor.index_put_((indices,), noise, accumulate=True)
 
     @override
-    def mutate(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
+    def mutate_(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
         self._jitter(term.ALPHA, indices, term.ALPHA.resolve(options, default=0.0))
 
         std_diameter = term.DIAMETER.resolve(options, default=0.0)

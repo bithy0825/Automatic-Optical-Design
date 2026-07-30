@@ -152,7 +152,7 @@ def _disk_uniform(count: tuple[int, int]) -> Float[Tensor, "N 2"]:
 
     r, a = torch.meshgrid(radii.sqrt(), angles, indexing="ij")
     x, y = r.mul(a.cos()).ravel(), r.mul(a.sin()).ravel()
-    ring_pts = torch.stack((x, y), dim=-1)  # shape: [rings*sectors, 2]
+    ring_pts = torch.stack((x, y), dim=-1)  # shape: [(rings-1)*sectors, 2]
     return torch.cat(
         (torch.zeros(1, 2), ring_pts), dim=0
     )  # shape: [rings*sectors - sectors + 1, 2]

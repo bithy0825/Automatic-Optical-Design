@@ -25,6 +25,12 @@ class GAOptions:
     mutate_std_end: float = 0.1
     damping: Literal["linear", "exponential", "none"] = "linear"
 
+    def __post_init__(self) -> None:
+        if self.population < 1:
+            raise ValueError(f"population must be >= 1, got {self.population}")
+        if self.topk is not None and not 1 <= self.topk <= self.population:
+            raise ValueError(f"topk must be in [1, {self.population}], got {self.topk}")
+
     @classmethod
     def from_options(cls, cfg: Mapping[str, Any] | None = None) -> Self:
         if cfg is None:
@@ -58,7 +64,7 @@ class GeneticAlgorithm:
         callbacks: Sequence[Callback] | None = None,
     ) -> None:
         opts = self.options
-        topk = opts.topk or opts.population // 2
+        topk = opts.topk if opts.topk is not None else max(opts.population // 2, 1)
         total_gen = opts.generation
 
         for gen in range(total_gen):
@@ -84,11 +90,15 @@ class GeneticAlgorithm:
                     loss = loss.add(p.detach())
                 order = loss.argsort()
 
-            seq.sort(order)
+            seq.sort_(order)
 
             if gen < total_gen - 1:
-                seq.breed(topk)
-                seq.mutate(torch.arange(seq.population), mutate_blocks)
+                seq.breed_(topk)
+                # 精英直通下一代：仅变异 topk 之后的个体
+                seq.mutate_(
+                    torch.arange(topk, seq.population, device=seq.device),
+                    mutate_blocks,
+                )
 
             if callbacks:
                 metrics = {k: v.detach().float().mean().item() for k, v in parts.items()}

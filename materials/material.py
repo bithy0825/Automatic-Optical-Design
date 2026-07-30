@@ -142,12 +142,12 @@ class Material(nn.Module):
         return [self.database.name_of(i) for i in self.Indices.tolist()]
 
     @torch.no_grad()
-    def sort(self, order: SystemLongScalar) -> None:
+    def sort_(self, order: SystemLongScalar) -> None:
         """原地排序材料编号。所有引用者自动可见。"""
         self.Indices.copy_(self.Indices.index_select(0, order))
 
     @torch.no_grad()
-    def breed(self, topk: int) -> None:
+    def breed_(self, topk: int) -> None:
         assert 0 < topk <= self.Indices.shape[0], (
             "Topk must be in the range (0, population]."
         )
@@ -157,7 +157,7 @@ class Material(nn.Module):
         self.Indices[topk:].copy_(elite[idx])
 
     @torch.no_grad()
-    def mutate(
+    def mutate_(
         self,
         indices: SystemLongScalar,
         std: float,

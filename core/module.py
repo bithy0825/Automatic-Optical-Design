@@ -17,7 +17,7 @@ class OpticalModule(nn.Module, ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        for name in ("sort", "breed", "mutate", "clone", "where"):
+        for name in ("sort_", "breed_", "mutate_", "clone", "where", "where_"):
             if name not in cls.__dict__:
                 continue
             attr = cls.__dict__[name]
@@ -80,13 +80,13 @@ class OpticalModule(nn.Module, ABC):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def sort(self, order: SystemLongScalar) -> None:
+    def sort_(self, order: SystemLongScalar) -> None:
         """按 *order* 重排所有批量张量（含子模块）。"""
         for _name, t in self._batched_tensors():
             t.copy_(t.index_select(0, order))
 
     @torch.no_grad()
-    def breed(self, topk: int) -> None:
+    def breed_(self, topk: int) -> None:
         """用前 *topk* 个精英滚动复制填充整个种群。"""
         assert 0 < topk <= self.population, (
             f"topk must be in (0, {self.population}], got {topk}"
@@ -96,7 +96,7 @@ class OpticalModule(nn.Module, ABC):
             t[topk:].copy_(t[:topk][idx])
 
     @torch.no_grad()
-    def mutate(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
+    def mutate_(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
         """对指定索引的个体做高斯扰动（按 ``mutable`` 词表逐项取标准差，
         缺省或为零则跳过）。"""
         for noun in self.mutable:
@@ -127,6 +127,23 @@ class OpticalModule(nn.Module, ABC):
             for (_, t), (_, o) in zip(mine, theirs):
                 t.index_copy_(0, reject, o.index_select(0, reject))
         return merged
+
+    @torch.no_grad()
+    def where_(self, mask: SystemBoolScalar, new: Self) -> None:
+        """原地个体选择：``mask=True`` 的行从 *new* 写入本体，模块树不变。
+
+        与 :meth:`where` 不同，不重建组件——所有 Parameter/buffer 对象身份
+        保持（优化器参数绑定、MaterialRef 材料链自然延续，无需 rebind），
+        与 :meth:`sort_` / :meth:`breed_` / :meth:`mutate_` 同一原地约定。
+        """
+        OpticalModule._check_operands(mask, new, self)
+        rows = mask.nonzero().squeeze(-1)
+        if rows.numel():
+            mine = list(self._batched_tensors())
+            theirs = list(new._batched_tensors())
+            assert [n for n, _ in mine] == [n for n, _ in theirs], "module trees differ"
+            for (_, t), (_, o) in zip(mine, theirs):
+                t.index_copy_(0, rows, o.index_select(0, rows))
 
     @staticmethod
     def _check_operands(

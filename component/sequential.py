@@ -104,7 +104,7 @@ class Sequential(Component):
     # ------------------------------------------------------------------
 
     @override
-    def mutate(
+    def mutate_(
         self,
         indices: SystemLongScalar,
         options: Sequence[Mapping[str, Any]] | Mapping[str, Any],
@@ -113,11 +113,11 @@ class Sequential(Component):
         各元件解出自己的 ``mutate`` 变异映射（缺省为空）。"""
         if isinstance(options, Mapping):
             raise TypeError(
-                "Sequential.mutate expects a sequence of per-component option "
+                "Sequential.mutate_ expects a sequence of per-component option "
                 "blocks, not a single mapping"
             )
         for comp, opts in zip(self, options, strict=True):
-            comp.mutate(indices, term.MUTATE.resolve(opts, default={}))
+            comp.mutate_(indices, term.MUTATE.resolve(opts, default={}))
 
     @classmethod
     @override

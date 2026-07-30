@@ -89,9 +89,7 @@ def _lr_map(lr_config: dict[str, float]) -> dict[str, float]:
 class GradientOptimizer:
     def __init__(self, options: AdamOptions | SGDOptions, *, stage: str = "") -> None:
         self.options = options
-        self._stage = stage or (
-            "adam" if isinstance(options, AdamOptions) else "sgd"
-        )
+        self._stage = stage or ("adam" if isinstance(options, AdamOptions) else "sgd")
         self._opt: torch.optim.Optimizer | None = None
 
     def run(
@@ -148,7 +146,9 @@ class GradientOptimizer:
             if callbacks:
                 for cb in callbacks:
                     cb.on_step_end(
-                        gen, step, self._stage,
+                        gen,
+                        step,
+                        self._stage,
                         {k: v.detach().mean().item() for k, v in parts.items()},
                     )
 
@@ -169,4 +169,5 @@ class GradientOptimizer:
                 return torch.optim.lr_scheduler.ExponentialLR(
                     self._opt, gamma=1e-6 ** (1.0 / opts.step)
                 )
-        raise ValueError(f"Unknown scheduler: {opts.scheduler}")
+            case _:
+                raise ValueError(f"Unknown scheduler: {opts.scheduler}")

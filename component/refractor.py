@@ -65,12 +65,12 @@ class Refractor(Component):
         return flow.with_rays(rays).at_verdict(hit.verdict).at_verdict(res.verdict)
 
     @override
-    def mutate(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
+    def mutate_(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
         """shape 按其 ``mutable`` 变异指定个体；材料按 ``MATERIAL`` 标准差整体变异。"""
-        self.shape.mutate(indices, options)
+        self.shape.mutate_(indices, options)
         std = term.MATERIAL.resolve(options, default=0.0)
         if std != 0.0:
-            self.transmitted.mutate(indices, std)
+            self.transmitted.mutate_(indices, std)
 
     @classmethod
     @override
