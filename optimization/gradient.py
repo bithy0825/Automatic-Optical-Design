@@ -114,6 +114,8 @@ class GradientOptimizer:
                 lr = lr_by_leaf.get(leaf, opts.default_lr)
                 groups.setdefault(lr, []).append(param)
             param_groups = [{"params": ps, "lr": lr} for lr, ps in groups.items()]
+            # 各组基准 lr（逐代重启退火时重置回去，见 _make_scheduler）
+            self._base_lrs = [g["lr"] for g in param_groups]
 
             if isinstance(opts, AdamOptions):
                 self._opt = torch.optim.Adam(
@@ -156,6 +158,10 @@ class GradientOptimizer:
         opts = self.options
         if opts.scheduler == "none" or self._opt is None:
             return None
+        # 逐代重启退火：余弦/指数类调度按"当前 lr"递推，上一代末尾 lr≈0
+        # 会把后续所有代锁死在 0——重建前先把各组 lr 重置回基准值。
+        for group, base in zip(self._opt.param_groups, self._base_lrs):
+            group["lr"] = base
         match opts.scheduler:
             case "cosine":
                 return torch.optim.lr_scheduler.CosineAnnealingLR(
