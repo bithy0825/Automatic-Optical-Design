@@ -44,9 +44,10 @@ class Asphere(Shape):
                 not term.CURVATURE.match(k)
                 and not term.KAPPA.match(k)
                 and not term.ALPHA.match(k)
+                and not term.DIAMETER.match(k)
             ):
                 warnings.warn(
-                    f"Unknown trainable key: {k}. Only 'curvature', 'kappa', 'alpha' are supported for Asphere."
+                    f"Unknown trainable key: {k}. Only 'curvature', 'kappa', 'alpha' and 'diameter' are supported for Asphere."
                 )
             else:
                 if term.CURVATURE.match(k):

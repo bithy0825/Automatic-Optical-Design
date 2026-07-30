@@ -38,9 +38,13 @@ class Conic(Shape):
         train_C = False
         train_K = False
         for k in self.trainable:
-            if not term.CURVATURE.match(k) and not term.KAPPA.match(k):
+            if (
+                not term.CURVATURE.match(k)
+                and not term.KAPPA.match(k)
+                and not term.DIAMETER.match(k)
+            ):
                 warnings.warn(
-                    f"Unknown trainable key: {k}. Only 'curvature' and 'kappa' are supported for Conic."
+                    f"Unknown trainable key: {k}. Only 'curvature', 'kappa' and 'diameter' are supported for Conic."
                 )
             else:
                 if term.CURVATURE.match(k):

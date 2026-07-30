@@ -52,7 +52,7 @@ def _lens(curvature: dict, material: dict, *, allow_negative: bool = False) -> d
         "alpha4": {"method": "raw", "value": 1e-4},
         "alpha6": {"method": "raw", "value": 1e-6},
         "material": material,
-        "train": {"curvature": True, "kappa": True, "alpha": True},
+        "train": {"diameter": True, "curvature": True, "kappa": True, "alpha": True},
         "mutate": {"curvature": 0.005, "kappa": 0.05, "alpha": 1e-5, "material": 0.1},
         "bounds": dict(_LENS_BOUNDS),
     }

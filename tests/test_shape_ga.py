@@ -96,9 +96,14 @@ def test_from_options() -> None:
           and torch.allclose(a.Alpha[0], torch.tensor([1e-4, 1e-6])))
     check("asphere mask default = n_coeffs", a.Mask.eq(2.0).all())
 
-    check("diameter always trainable", s.Diameter.requires_grad
-          and c.Diameter.requires_grad and a.Diameter.requires_grad
-          and d.Diameter.requires_grad)
+    check("diameter NOT trained (not listed)", not s.Diameter.requires_grad
+          and not c.Diameter.requires_grad and not a.Diameter.requires_grad
+          and not d.Diameter.requires_grad)
+    d_optin = Shape.from_options(2, {"shape": "sphere",
+                                     "diameter": {"method": "raw", "value": 10.0},
+                                     "curvature": {"method": "raw", "value": 0.01},
+                                     "train": {"diameter": True}})
+    check("diameter opt-in trainable", d_optin.Diameter.requires_grad)
     check("sphere curvature opt-in", s.Curvature.requires_grad)
     check("conic kappa opt-in", c.Kappa.requires_grad)
     check("asphere alpha opt-in", a.Alpha.requires_grad)

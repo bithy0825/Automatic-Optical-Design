@@ -36,12 +36,13 @@ class Sphere(Shape):
 
         train_C = False
         for k in self.trainable:
-            if not term.CURVATURE.match(k):
+            if not term.CURVATURE.match(k) and not term.DIAMETER.match(k):
                 warnings.warn(
-                    f"Unknown trainable key: {k}. Only 'curvature' is supported for Sphere."
+                    f"Unknown trainable key: {k}. Only 'curvature' and 'diameter' are supported for Sphere."
                 )
             else:
-                train_C = self.trainable[k]
+                if term.CURVATURE.match(k):
+                    train_C = self.trainable[k]
 
         self.Curvature = init_param(self, term.CURVATURE, curvature, train_C)
 

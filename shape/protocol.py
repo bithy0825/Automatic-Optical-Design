@@ -43,16 +43,23 @@ class Shape(OpticalModule, ABC):
         solver_opts: NewtonSolverOptions | Mapping[str, Any] | None = None,
         trainable: Mapping[str, bool] | None = None,
     ):
-        """统一注册机械直径（恒为可训练参数）并装配求解器。
+        """统一注册机械直径并装配求解器。
 
         Args:
             diameter: 机械直径 (mm)，``(P,)`` 张量。
             solver_opts: 求解器选项实例或配置映射，缺省为 Newton 默认值。
-            trainable: 其余参数的可训练标记（严格 opt-in，键经词表校验由
-                子类解释）。
+            trainable: 可训练标记（严格 opt-in，直径与其他参数同规：仅当
+                ``train`` 映射显式点名 ``diameter`` 才注册为可训练参数，
+                缺省冻结为 buffer，由 GA 变异 + bounds 铰链演化约束；
+                其余键经词表校验由子类解释）。
         """
         super().__init__()
-        self.Diameter = init_param(self, term.DIAMETER, diameter, True)
+        if trainable is not None and not isinstance(trainable, Mapping):
+            raise TypeError("trainable must be a mapping or None")
+        self.trainable = dict(trainable or {})
+
+        train_D = bool(term.DIAMETER.resolve(self.trainable, default=False))
+        self.Diameter = init_param(self, term.DIAMETER, diameter, train_D)
 
         if solver_opts is None:
             solver_opts = NewtonSolverOptions()
@@ -60,10 +67,6 @@ class Shape(OpticalModule, ABC):
             solver_opts = make_solver_options(**solver_opts)
         self._solver_opts = solver_opts
         self._solver_fn: SolverFunction = solve(solver_opts)
-
-        if trainable is not None and not isinstance(trainable, Mapping):
-            raise TypeError("trainable must be a mapping or None")
-        self.trainable = dict(trainable or {})
 
     @abstractmethod
     def sag(self) -> SagFunction:
