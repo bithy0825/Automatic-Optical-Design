@@ -10,11 +10,16 @@ topk = 4
 generation = 100
 
 [[optimizer]]
+type = "sa"
+step = 200
+T0 = 10.0
+T1 = 0.01
+
+[[optimizer]]
 type = "adam"
-step = 1000
+step = 200
 scheduler = "cosine"
 grad_norm = 10.0
-default = { lr = 1e-3 }
 lr = {}
 
 [loss]

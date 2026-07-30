@@ -160,7 +160,7 @@ def test_sort() -> None:
     for kind, params in PARAMS.items():
         s = build(kind)
         snapshots = {p: getattr(s, p).detach().clone() for p in params}
-        s.sort(PERM)
+        s.sort_(PERM)
         ok = all(
             torch.equal(getattr(s, p), snapshots[p][PERM]) for p in params
         )
@@ -179,7 +179,7 @@ def test_breed() -> None:
         topk = 2
         snapshots = {p: getattr(s, p).detach().clone() for p in params}
         idx = torch.arange(POP - topk).remainder(topk)
-        s.breed(topk)
+        s.breed_(topk)
         ok = True
         for p in params:
             want = snapshots[p].clone()
@@ -189,10 +189,10 @@ def test_breed() -> None:
 
     s = build("sphere")
     before = s.Diameter.clone()
-    s.breed(POP)
+    s.breed_(POP)
     check("breed topk==P is no-op", torch.equal(s.Diameter, before))
     try:
-        s.breed(POP + 1)
+        s.breed_(POP + 1)
         check("breed out-of-range raises", False)
     except AssertionError:
         check("breed out-of-range raises", True)
@@ -210,7 +210,7 @@ def test_mutate() -> None:
         s = build(kind)
         snapshots = {p: getattr(s, p).detach().clone() for p in params}
         options = {"curvature": 0.01, "kappa": 1e-3, "alpha": 1e-5, "diameter": 0.0}
-        s.mutate(IDX, options)
+        s.mutate_(IDX, options)
 
         # diameter std=0 → 不变（Asphere 例外：它的 diameter 段只重归一化 α，自身也不应变）
         check(f"mutate {kind} diameter untouched (std=0)",
@@ -239,7 +239,7 @@ def test_mutate() -> None:
     a = build("asphere")
     rho_old = a.Diameter.mul(0.5).unsqueeze(-1)
     phys_old = a.Alpha.detach().clone().div(rho_old.pow(torch.tensor([4.0, 6.0])))
-    a.mutate(torch.arange(POP), {"diameter": 1.0})
+    a.mutate_(torch.arange(POP), {"diameter": 1.0})
     rho_new = a.Diameter.mul(0.5).unsqueeze(-1)
     phys_new = a.Alpha.detach().clone().div(rho_new.pow(torch.tensor([4.0, 6.0])))
     check("asphere diameter-mutation keeps physical alpha",
@@ -247,7 +247,7 @@ def test_mutate() -> None:
 
     # Asphere 专项：mask 随机游走有界
     torch.manual_seed(5)
-    a.mutate(torch.arange(POP), {"mask": 1.0})
+    a.mutate_(torch.arange(POP), {"mask": 1.0})
     check("asphere mask walk bounded [0, n_coeffs]",
           bool(((a.Mask >= 0.0) & (a.Mask <= 2.0)).all()))
 
