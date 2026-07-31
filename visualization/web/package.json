@@ -1,0 +1,19 @@
+{
+  "name": "aod-viz-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/index.ts src/layout.ts src/spot.ts --outdir dist --target browser",
+    "watch": "bun build src/index.ts src/layout.ts src/spot.ts --outdir dist --target browser --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/three": "^0.185.1",
+    "typescript": "5.9.3"
+  }
+}

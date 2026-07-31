@@ -219,3 +219,5 @@ __marimo__/
 
 .codegraph/
 tests/*.png
+# Node / Bun
+node_modules/

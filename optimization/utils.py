@@ -1,6 +1,9 @@
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 import tomllib
+
+import torch
 
 from core import term
 from component import Sequential
@@ -45,3 +48,22 @@ def build_sequential(
     population = term.POPULATION.resolve(term.GA.resolve(cfg))
 
     return Sequential.from_options(population, components)
+
+
+def save(seq: Sequential, cfg: Mapping[str, Any], path: str | Path) -> None:
+    """保存训练检查点:``(完整配置, 训练后参数状态)`` 二元组。
+
+    配置原样附带(可无损重建系统);参数经 ``seq.state_dict()`` 序列化,
+    键由模块树自动生成(含曲率、厚度、直径、材料编号等全部批量张量)。
+    加载见 :func:`load`。
+    """
+    torch.save((dict(cfg), seq.state_dict()), path)
+
+
+def load(path: str | Path) -> tuple[Sequential, Target]:
+    """加载训练检查点:按附带配置重建系统并注入训练后状态(strict)。"""
+    cfg, state = torch.load(path, weights_only=True, map_location="cpu")
+    target = build_target(cfg)
+    seq = build_sequential(cfg, target)
+    seq.load_state_dict(state, strict=True)
+    return seq, target

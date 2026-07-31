@@ -17,7 +17,7 @@ from optimization.loss import (
     total_loss,
 )
 from optimization.target import Target
-from optimization.utils import build_sequential
+from optimization.utils import build_sequential, load, load_config, build_target, save
 
 __all__ = [
     # options
@@ -40,7 +40,11 @@ __all__ = [
     # target
     "Target",
     # utils
+    "load_config",
+    "build_target",
     "build_sequential",
+    "save",
+    "load",
     # callback
     "Callback",
     "LossHistory",
