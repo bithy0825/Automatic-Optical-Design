@@ -39,7 +39,7 @@ class ProgressBar:
                 self.step_bar.reset()
             self._last_stage = stage
         if self.step_bar:
-            self.step_bar.set_postfix({"loss": f"{metrics.get('loss', metrics.get('spot', 0)):.3g}"})
+            self.step_bar.set_postfix({"loss": f"{metrics.get('loss', metrics.get('blur', 0)):.3g}"})
             self.step_bar.update(1)
 
     def on_gen_end(self, gen: int, metrics: dict[str, Any]) -> None:

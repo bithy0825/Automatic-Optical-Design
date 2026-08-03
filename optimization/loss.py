@@ -46,7 +46,9 @@ class LossWeights:
     """各损失项权重。未列出的 cause / 边界参数权重缺省为 1.0。"""
 
     effl: float = 1.0
-    spot: float = 1.0
+    blur: float = 1.0
+    distortion: float = 1.0
+    survival: float = 0.0
     toll: dict[Verdict.Cause, float] = field(default_factory=dict)
     bounds: dict[Noun, float] = field(default_factory=dict)
 
@@ -54,16 +56,17 @@ class LossWeights:
     def from_options(cls, options: Mapping[str, float]) -> Self:
         """从配置构造（一次性解析，``loss`` 键下的扁平映射）。
 
-        键：``effl`` / ``spot`` / 各死因名词（``sag_domain``、
-        ``solver_negative``、``solver_convergence``、``aperture_clip``、
-        ``tir``）/ 各边界参数名词（``diameter``、``curvature``、``kappa``、
-        ``alpha``、``thickness``）。
+        键：``effl`` / ``blur`` / ``distortion`` / ``survival`` / 各死因名词
+        （``sag_domain``、``solver_negative``、``solver_convergence``、
+        ``aperture_clip``、``tir``）/ 各边界参数名词（``diameter``、
+        ``curvature``、``kappa``、``alpha``、``thickness``）。
         """
         options = term.LOSS.resolve(options, default={})
         toll: dict[Verdict.Cause, float] = {}
         bounds: dict[Noun, float] = {}
+        scalars = (term.EFFL, term.BLUR, term.DISTORTION, term.SURVIVAL)
         for key, value in options.items():
-            if term.EFFL.match(key) or term.SPOT.match(key):
+            if any(noun.match(key) for noun in scalars):
                 continue
             cause = _cause_of(key)
             if cause is not None:
@@ -72,7 +75,9 @@ class LossWeights:
                 bounds[_noun_of(key)] = float(value)
         return cls(
             effl=term.EFFL.resolve(options, default=1.0),
-            spot=term.SPOT.resolve(options, default=1.0),
+            blur=term.BLUR.resolve(options, default=1.0),
+            distortion=term.DISTORTION.resolve(options, default=1.0),
+            survival=term.SURVIVAL.resolve(options, default=0.0),
             toll=toll,
             bounds=bounds,
         )
@@ -92,17 +97,51 @@ def effl_loss(
     return f_est.sub(target.effl).div(target.effl).square().mul(weights.effl)
 
 
-def spot_loss(
+def _chief(flow: TraceFlow) -> torch.Tensor:
+    """逐视场主光线：存活光线在传感器上的加权质心，``(P, F, 1, 1, 2)``。
+
+    跨波长、跨光瞳聚合（横向色差因此留在 blur 内）；不 detach——
+    梯度经质心回传（标准 RMS-about-centroid 语义）。
+    """
+    h = flow.rays.points[..., :2]
+    w = flow.verdict.hold
+    den = w.sum(dim=(2, 3), keepdim=True).unsqueeze(-1)
+    return sturdy_div(w.unsqueeze(-1).mul(h).sum(dim=(2, 3), keepdim=True), den)
+
+
+def blur_loss(flow: TraceFlow, weights: LossWeights) -> SystemFloatScalar:
+    """加权模糊：存活光线相对本视场主光线的均方偏差 (mm²)——纯成像质量。"""
+    h = flow.rays.points[..., :2]
+    w = flow.verdict.hold
+    r2 = h.sub(_chief(flow)).square().sum(dim=-1)
+    return sturdy_div(w.mul(r2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
+        weights.blur
+    )
+
+
+def distortion_loss(
     flow: TraceFlow, target: Target, weights: LossWeights
 ) -> SystemFloatScalar:
-    """加权点列：存活光线相对理想像点的均方偏差 (mm²)。"""
-    t = flow.rays.field.tan()
-    h = flow.rays.points[..., :2]
-    r2 = h.sub(t.mul(target.effl)).square().sum(dim=-1)  # 每光线 |残差|²
+    """加权畸变：逐视场主光线相对理想像点的均方偏差 (mm²)——焦距 / 畸变。
+
+    与 :func:`blur_loss` 互补：两者等权之和精确等于"相对理想像点的点列"
+    （勾股分解，交叉项为零）。
+    """
     w = flow.verdict.hold
-    return sturdy_div(w.mul(r2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
-        weights.spot
+    ideal = flow.rays.field.tan().mul(target.effl)
+    d2 = _chief(flow).sub(ideal).square().sum(dim=-1)
+    return sturdy_div(w.mul(d2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
+        weights.distortion
     )
+
+
+def survival_loss(flow: TraceFlow, weights: LossWeights) -> SystemFloatScalar:
+    """加权死亡计数：每死一条光线固定代价，与死亡深度无关。
+
+    不可微——仅在 GA 排序与 SA 接受中施加选择压力；梯度阶段由 toll 负责。
+    """
+    dead = flow.verdict.hold.logical_not()
+    return dead.float().mean(dim=(1, 2, 3)).mul(weights.survival)
 
 
 def toll_loss(flow: TraceFlow, weights: LossWeights) -> SystemFloatScalar:
@@ -148,15 +187,17 @@ def total_loss(
     blocks: Sequence[Mapping[str, Any]],
     weights: LossWeights | None = None,
 ) -> tuple[SystemFloatScalar, dict[str, SystemFloatScalar]]:
-    """总损失与四项加权分项（分项用于日志与 GA 择优）。"""
+    """总损失与六项加权分项（分项用于日志与 GA 择优）。"""
     weights = weights or LossWeights()
     parts = {
         "effl": effl_loss(flow, target, weights),
-        "spot": spot_loss(flow, target, weights),
+        "blur": blur_loss(flow, weights),
+        "distortion": distortion_loss(flow, target, weights),
+        "survival": survival_loss(flow, weights),
         "toll": toll_loss(flow, weights),
         "bounds": bounds_loss(seq, blocks, weights),
     }
-    total = torch.zeros_like(parts["spot"])
+    total = torch.zeros_like(parts["blur"])
     for p in parts.values():
         total = total.add(p)
     return total, parts

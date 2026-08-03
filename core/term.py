@@ -25,6 +25,14 @@ SCHEDULER: Final = Noun.for_key("Scheduler", "scheduler")
 GRAD_NORM: Final = Noun.for_key("Gradient_Norm", "grad_norm")
 DEFAULT: Final = Noun.for_key("Default", "default")
 
+# ── 训练运行控制（[train] 节） ──
+SEED: Final = Noun.for_key("Seed", "seed")
+DEVICE: Final = Noun.for_key("Device", "device")
+OUTPUT: Final = Noun.for_key("Output", "output")
+RESUME: Final = Noun.for_key("Resume", "resume")
+SAVE_EVERY: Final = Noun.for_key("Save_Every", "save_every")
+HISTORY: Final = Noun.for_key("History", "history")
+
 # ── 目标与采样 ──
 TARGET: Final = Noun.for_key("Target", "target")
 FOV: Final = Noun.for_key("Field_of_View", "FOV", "fov")
@@ -58,7 +66,9 @@ INDEX: Final = Noun.for_key("Index", "index")
 INDICES: Final = Noun.for_key("Indices", "indices")
 # ── 损失与裁决死因（LossWeights 键） ──
 LOSS: Final = Noun.for_key("Loss", "loss")
-SPOT: Final = Noun.for_key("Spot", "spot")
+BLUR: Final = Noun.for_key("Blur", "blur")
+DISTORTION: Final = Noun.for_key("Distortion", "distortion")
+SURVIVAL: Final = Noun.for_key("Survival", "survival")
 SAG_DOMAIN: Final = Noun.for_key("Sag_Domain", "sag_domain")
 SOLVER_NEGATIVE: Final = Noun.for_key("Solver_Negative", "solver_negative")
 SOLVER_CONVERGENCE: Final = Noun.for_key("Solver_Convergence", "solver_convergence")

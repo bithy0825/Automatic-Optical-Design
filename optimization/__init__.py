@@ -10,9 +10,11 @@ from optimization.gradient import (
 )
 from optimization.loss import (
     LossWeights,
+    blur_loss,
     bounds_loss,
+    distortion_loss,
     effl_loss,
-    spot_loss,
+    survival_loss,
     toll_loss,
     total_loss,
 )
@@ -32,9 +34,11 @@ __all__ = [
     "SimulatedAnnealing",
     "Stager",
     # loss
+    "blur_loss",
     "bounds_loss",
+    "distortion_loss",
     "effl_loss",
-    "spot_loss",
+    "survival_loss",
     "toll_loss",
     "total_loss",
     # target
