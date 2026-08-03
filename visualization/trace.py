@@ -13,9 +13,10 @@ from typing import Final
 import numpy as np
 import torch
 
-from component import InfiniteSource, Refractor, Sensor, Sequential
+from component import Gap, InfiniteSource, Refractor, Sensor, Sequential
 from component.protocol import Component
 from core import TraceFlow, Transformer
+from core.sturdy_math import sturdy_div
 from implicit.protocol import FieldResult
 from sampling import SampleOptions
 from shape import Shape
@@ -40,6 +41,7 @@ class LayoutData:
     rims: np.ndarray             # (P, S, 2, 2) f32,[下边缘, 上边缘]
     paths: np.ndarray            # (P, F, W, N, S+1, 3) f32,第 0 步为发射面
     holds: np.ndarray            # (P, F, W, N, S+1) u8
+    effl: np.ndarray             # (P,) f32,存活光线最小二乘估计焦距(同 effl_loss)
     fields_deg: np.ndarray       # (F, 2) f32
     wavelengths_nm: np.ndarray   # (W,) f32
 
@@ -153,11 +155,20 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
     holds = torch.stack(step_hold, dim=-1).cpu().numpy().astype(np.uint8)
     profs = torch.stack(profiles, dim=1).cpu().numpy().astype(np.float32)
     rim = torch.stack(rims, dim=1).cpu().numpy().astype(np.float32)
+    # EFFL:存活光线"像高 ~ 视场角正切"的最小二乘斜率(与 effl_loss 同一估计量)
+    t = flow.rays.field.tan()
+    h = flow.rays.points[..., :2]
+    w = flow.verdict.hold.unsqueeze(-1)
+    effl = sturdy_div(
+        w.mul(h).mul(t).sum(dim=(1, 2, 3, 4)),
+        w.mul(t.square()).sum(dim=(1, 2, 3, 4)),
+    )
+    effl_np = effl.cpu().numpy().astype(np.float32)
     fields_deg = torch.rad2deg(flow.rays.field[0, :, 0, 0, :]).cpu().numpy().astype(np.float32)
     wls = flow.rays.wavelength[0, 0, :, 0].cpu().numpy().astype(np.float32)
     return LayoutData(
         labels=labels, kinds=kinds, regions=regions,
-        profiles=profs, rims=rim, paths=paths, holds=holds,
+        profiles=profs, rims=rim, paths=paths, holds=holds, effl=effl_np,
         fields_deg=fields_deg, wavelengths_nm=wls,
     )
 
@@ -228,6 +239,16 @@ class TraceCache:
         self._seq = seq
         self._layout: dict[int, LayoutData] = {}
         self._spot: dict[tuple[int, str], SpotData] = {}
+        # 系统总长:首个折射面顶点 → 传感器,即其后的全部 gap 厚度之和(逐 pop)
+        P = seq.population
+        total = torch.zeros(P, device=seq.device, dtype=seq.dtype)
+        seen_refractor = False
+        for comp in seq:
+            if isinstance(comp, Refractor):
+                seen_refractor = True
+            elif isinstance(comp, Gap) and seen_refractor:
+                total = total.add(comp.Thickness.detach().view(P, -1).sum(dim=1))
+        self._total_length = total.cpu().numpy().astype(np.float32)
 
     def layout(self, n_rays: int) -> LayoutData:
         if n_rays not in self._layout:
@@ -247,6 +268,8 @@ class TraceCache:
             "labels": data.labels,
             "kinds": data.kinds,
             "regions": [r[pop] for r in data.regions],
+            "effl": float(data.effl[pop]),
+            "total_length": float(self._total_length[pop]),
             "fields_deg": data.fields_deg.tolist(),
             "wavelengths_nm": data.wavelengths_nm.tolist(),
         }

@@ -57,6 +57,15 @@ export async function boot(): Promise<void> {
     const items: LabelItem[] = [
       { key: "scale", x: 56, y: viewHost.clientHeight - 18, text: `Δ ${viewport.gridStep} mm`, cls: "lbl" },
     ];
+    if (packet) {
+      items.push({
+        key: "spec",
+        x: viewHost.clientWidth / 2,
+        y: viewHost.clientHeight - 18,
+        text: `总长 ${packet.meta.total_length.toFixed(2)} mm · EFFL ${packet.meta.effl.toFixed(2)} mm`,
+        cls: "lbl",
+      });
+    }
     labels.render(items);
   };
 

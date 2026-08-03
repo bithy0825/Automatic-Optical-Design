@@ -148,7 +148,11 @@ def _disk_uniform(count: tuple[int, int]) -> Float[Tensor, "N 2"]:
     """
     rings, sectors = count
     radii = torch.linspace(0.0, 1.0, rings)[1:]
-    angles = torch.arange(sectors, dtype=torch.float32).div_(sectors).mul_(2 * torch.pi)
+    angles = (
+        torch.arange(sectors, dtype=torch.get_default_dtype())
+        .div_(sectors)
+        .mul_(2 * torch.pi)
+    )
 
     r, a = torch.meshgrid(radii.sqrt(), angles, indexing="ij")
     x, y = r.mul(a.cos()).ravel(), r.mul(a.sin()).ravel()
@@ -170,7 +174,7 @@ def _disk_fibonacci(count: int) -> Float[Tensor, "N 2"]:
     if count == 1:
         return torch.zeros(1, 2)
 
-    i = torch.arange(1, count, dtype=torch.float32)
+    i = torch.arange(1, count, dtype=torch.get_default_dtype())
     rho = i.div(count - 1).sqrt()
     theta = i.mul(_GOLDEN_ANGLE)
 

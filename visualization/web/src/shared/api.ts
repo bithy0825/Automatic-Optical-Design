@@ -79,6 +79,8 @@ export interface LayoutMeta {
   labels: string[];
   kinds: string[];
   regions: string[]; // S+1 段:regions[0] 为首面上游,regions[j] 为面 j-1 下游
+  effl: number; // 最小二乘估计焦距 mm(与 effl_loss 同一估计量)
+  total_length: number; // 首面顶点 → 传感器总长 mm
   fields_deg: [number, number][];
   wavelengths_nm: number[];
 }

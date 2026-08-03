@@ -45,9 +45,13 @@ export function prepCell(
   const wlNm = packet.meta.wavelengths_nm[wi];
   const airyR = opts.fNumber ? airyDiameterMm(wlNm, opts.fNumber) / 2 : 0;
   const r = Math.max(geo, airyR, 1e-6) * 1.6; // 余量:点云约占半幅 62%
+  const lines: string[] = alive.length
+    ? [`RMS ${fmtUm(rms)}`, `GEO ${fmtUm(geo)}`]
+    : ["无存活光线"];
+  if (airyR > 0) lines.push(`AIRY ${fmtUm(airyR)}`); // 衍射极限半径(本格波长)
   return {
     alive, dead, ref, r, airyR, wlNm,
-    stats: alive.length ? `RMS ${fmtUm(rms)}\nGEO ${fmtUm(geo)}` : "无存活光线",
+    stats: lines.join("\n"),
   };
 }
 

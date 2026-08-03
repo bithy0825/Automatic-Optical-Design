@@ -53,7 +53,7 @@ class AdamWOptions(AdamOptions):
 @dataclass(slots=True)
 class SGDOptions:
     step: int = 200
-    default_lr: float = 1e-2
+    default_lr: float = 1e-3
     lr: dict[str, float] = field(default_factory=dict)
     momentum: float = 0.9
     weight_decay: float = 0.0
@@ -66,7 +66,7 @@ class SGDOptions:
             return cls()
         return cls(
             step=int(cfg.get("step", 200)),
-            default_lr=float(cfg.get("default_lr", 1e-2)),
+            default_lr=float(cfg.get("default_lr", 1e-3)),
             lr={str(k): float(v) for k, v in cfg.get("lr", {}).items()},
             momentum=float(cfg.get("momentum", 0.9)),
             weight_decay=float(cfg.get("weight_decay", 0.0)),

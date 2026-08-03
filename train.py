@@ -172,6 +172,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    torch.set_default_dtype(torch.float64)  # 全程双精度（含追迹与优化）
     args = parse_args()
     config_path = Path(args.config).resolve()
     cfg = load_config(str(config_path))
@@ -210,7 +211,10 @@ def main() -> None:
     callbacks: list[Any] = [history]
     if run.progress:
         callbacks.append(
-            ProgressBar(o.generation, max((s.options.step for s in stages), default=0))
+            ProgressBar(
+                o.generation,
+                {term.TYPE.resolve(b): s.options.step for b, s in zip(optimizer_blocks, stages)},
+            )
         )
     if run.save_every is not None:
         callbacks.append(PeriodicSaver(seq, cfg, run.output, run.save_every))
