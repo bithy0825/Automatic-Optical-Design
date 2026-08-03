@@ -43,6 +43,14 @@ class AdamOptions:
 
 
 @dataclass(slots=True)
+class AdamWOptions(AdamOptions):
+    """AdamW：配置与 Adam 相同，仅权重衰减解耦（不进梯度、不被自适应缩放）。
+
+    ``weight_decay = 0`` 时与 Adam 严格等价。
+    """
+
+
+@dataclass(slots=True)
 class SGDOptions:
     step: int = 200
     default_lr: float = 1e-2
@@ -89,7 +97,13 @@ def _lr_map(lr_config: dict[str, float]) -> dict[str, float]:
 class GradientOptimizer:
     def __init__(self, options: AdamOptions | SGDOptions, *, stage: str = "") -> None:
         self.options = options
-        self._stage = stage or ("adam" if isinstance(options, AdamOptions) else "sgd")
+        self._stage = stage or (
+            "sgd"
+            if isinstance(options, SGDOptions)
+            else "adamw"
+            if isinstance(options, AdamWOptions)
+            else "adam"
+        )
         self._opt: torch.optim.Optimizer | None = None
 
     def run(
@@ -118,7 +132,12 @@ class GradientOptimizer:
             self._base_lrs = [g["lr"] for g in param_groups]
 
             if isinstance(opts, AdamOptions):
-                self._opt = torch.optim.Adam(
+                torch_cls = (
+                    torch.optim.AdamW
+                    if isinstance(opts, AdamWOptions)
+                    else torch.optim.Adam
+                )
+                self._opt = torch_cls(
                     param_groups,
                     betas=opts.betas,
                     weight_decay=opts.weight_decay,

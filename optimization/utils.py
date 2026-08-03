@@ -9,7 +9,7 @@ from core import term
 from component import Sequential
 from optimization.annealing import SAOptions, SimulatedAnnealing
 from optimization.genetic import Stager
-from optimization.gradient import AdamOptions, GradientOptimizer, SGDOptions
+from optimization.gradient import AdamOptions, AdamWOptions, GradientOptimizer, SGDOptions
 from optimization.target import Target
 
 
@@ -79,6 +79,8 @@ def build_stage(block: Mapping[str, Any]) -> Stager:
             return SimulatedAnnealing(SAOptions.from_options(block))
         case "adam":
             return GradientOptimizer(AdamOptions.from_options(block))
+        case "adamw":
+            return GradientOptimizer(AdamWOptions.from_options(block))
         case "sgd":
             return GradientOptimizer(SGDOptions.from_options(block))
         case other:

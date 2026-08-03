@@ -5,6 +5,7 @@ from optimization.callback import Callback, LossHistory, PeriodicSaver, Progress
 from optimization.genetic import GAOptions, GeneticAlgorithm, Stager
 from optimization.gradient import (
     AdamOptions,
+    AdamWOptions,
     GradientOptimizer,
     SGDOptions,
 )
@@ -24,6 +25,7 @@ from optimization.utils import build_sequential, build_stage, load, load_config,
 __all__ = [
     # options
     "AdamOptions",
+    "AdamWOptions",
     "GAOptions",
     "LossWeights",
     "SAOptions",
