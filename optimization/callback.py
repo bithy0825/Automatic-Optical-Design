@@ -1,8 +1,12 @@
 """优化回调协议与内置实现。"""
 
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Protocol
 
 from tqdm import tqdm
+
+from component import Sequential
 
 
 class Callback(Protocol):
@@ -52,3 +56,28 @@ class ProgressBar:
         self.gen_bar.close()
         if self.step_bar:
             self.step_bar.close()
+
+
+class PeriodicSaver:
+    """每 ``every`` 代把检查点滚动覆盖保存到 ``path``（与最终存档同路径）。"""
+
+    def __init__(
+        self, seq: Sequential, cfg: Mapping[str, Any], path: Path, every: int
+    ) -> None:
+        self.seq = seq
+        self.cfg = cfg
+        self.path = path
+        self.every = every
+
+    def on_step_end(
+        self, gen: int, step: int, stage: str, metrics: dict[str, Any]
+    ) -> None:
+        pass
+
+    def on_gen_end(self, gen: int, metrics: dict[str, Any]) -> None:
+        if (gen + 1) % self.every == 0:
+            from optimization.utils import save  # 延迟导入，避免循环
+
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            save(self.seq, self.cfg, self.path)
+            tqdm.write(f"[save] gen {gen + 1} -> {self.path}")

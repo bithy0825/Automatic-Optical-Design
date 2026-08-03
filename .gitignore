@@ -221,3 +221,6 @@ __marimo__/
 tests/*.png
 # Node / Bun
 node_modules/
+
+demo/
+zebase/

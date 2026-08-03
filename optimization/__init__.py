@@ -1,7 +1,7 @@
 """优化模块：损失函数、目标规格、梯度下降 / 模拟退火 / 遗传算法。"""
 
 from optimization.annealing import SAOptions, SimulatedAnnealing
-from optimization.callback import Callback, LossHistory, ProgressBar
+from optimization.callback import Callback, LossHistory, PeriodicSaver, ProgressBar
 from optimization.genetic import GAOptions, GeneticAlgorithm, Stager
 from optimization.gradient import (
     AdamOptions,
@@ -19,7 +19,7 @@ from optimization.loss import (
     total_loss,
 )
 from optimization.target import Target
-from optimization.utils import build_sequential, load, load_config, build_target, save
+from optimization.utils import build_sequential, build_stage, load, load_config, build_target, save
 
 __all__ = [
     # options
@@ -47,10 +47,12 @@ __all__ = [
     "load_config",
     "build_target",
     "build_sequential",
+    "build_stage",
     "save",
     "load",
     # callback
     "Callback",
     "LossHistory",
+    "PeriodicSaver",
     "ProgressBar",
 ]

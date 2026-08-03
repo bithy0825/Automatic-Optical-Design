@@ -7,6 +7,9 @@ import torch
 
 from core import term
 from component import Sequential
+from optimization.annealing import SAOptions, SimulatedAnnealing
+from optimization.genetic import Stager
+from optimization.gradient import AdamOptions, GradientOptimizer, SGDOptions
 from optimization.target import Target
 
 
@@ -67,3 +70,16 @@ def load(path: str | Path) -> tuple[Sequential, Target]:
     seq = build_sequential(cfg, target)
     seq.load_state_dict(state, strict=True)
     return seq, target
+
+
+def build_stage(block: Mapping[str, Any]) -> Stager:
+    """按 ``type`` 分发构造一个优化阶段（sa / adam / sgd）。"""
+    match term.TYPE.resolve(block):
+        case "sa":
+            return SimulatedAnnealing(SAOptions.from_options(block))
+        case "adam":
+            return GradientOptimizer(AdamOptions.from_options(block))
+        case "sgd":
+            return GradientOptimizer(SGDOptions.from_options(block))
+        case other:
+            raise ValueError(f"Unknown optimizer type: {other!r}")
