@@ -9,6 +9,7 @@ from component.protocol import Component
 from component.refractor import Refractor
 from component.sensor import Sensor
 from component.source import InfiniteSource
+from component.stop import Stop
 from materials import Material
 from shape import Shape
 
@@ -60,9 +61,9 @@ class Sequential(Component):
         return super().__getitem__(key)
 
     def shapes(self) -> Iterator[Shape]:
-        """链上所有面形（Refractor / Sensor 的 shape），供边界损失等导出。"""
+        """链上所有面形（Refractor / Stop / Sensor 的 shape），供边界损失等导出。"""
         for comp in self:
-            if isinstance(comp, (Refractor, Sensor)):
+            if isinstance(comp, (Refractor, Stop, Sensor)):
                 yield comp.shape
 
     # ------------------------------------------------------------------

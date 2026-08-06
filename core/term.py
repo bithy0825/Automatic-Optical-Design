@@ -79,6 +79,7 @@ TIR: Final = Noun.for_key("TIR", "tir")
 SOURCE: Final = Noun.for_key("Source", "source")
 GAP: Final = Noun.for_key("Gap", "gap")
 REFRACTOR: Final = Noun.for_key("Refractor", "refractor")
+STOP: Final = Noun.for_key("Stop", "stop")
 SENSOR: Final = Noun.for_key("Sensor", "sensor")
 SEQUENTIAL: Final = Noun.for_key("Sequential", "sequential")
 

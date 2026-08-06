@@ -13,7 +13,7 @@ from typing import Final
 import numpy as np
 import torch
 
-from component import Gap, InfiniteSource, Refractor, Sensor, Sequential
+from component import Gap, InfiniteSource, Refractor, Sensor, Sequential, Stop
 from component.protocol import Component
 from core import TraceFlow, Transformer
 from core.sturdy_math import sturdy_div
@@ -131,10 +131,10 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
     regions: list[list[str]] = [seq[0].transmitted.names()]
 
     def _cb(comp: Component, flow: TraceFlow, _i: int) -> TraceFlow:
-        if isinstance(comp, (InfiniteSource, Refractor, Sensor)):
+        if isinstance(comp, (InfiniteSource, Refractor, Stop, Sensor)):
             step_pts.append(flow.rays.points.detach())
             step_hold.append(flow.verdict.hold.detach())
-        if isinstance(comp, (Refractor, Sensor)):
+        if isinstance(comp, (Refractor, Stop, Sensor)):
             prof, rim = _profiles(comp.shape, flow.transformer)
             profiles.append(prof)
             rims.append(rim)
@@ -142,6 +142,10 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
                 labels.append(f"S{len(labels) + 1}")
                 kinds.append(str(comp.shape.kind.canonical))
                 regions.append(comp.transmitted.names())
+            elif isinstance(comp, Stop):
+                labels.append("Stop")
+                kinds.append("stop")
+                regions.append(regions[-1])  # 光阑不改介质:下游 = 上游
             else:
                 labels.append("Sensor")
                 kinds.append("sensor")
