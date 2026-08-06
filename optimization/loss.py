@@ -5,7 +5,7 @@ from typing import Any, Self
 import torch
 
 from core import Noun, SystemFloatScalar, TraceFlow, Verdict, sturdy_div, term
-from component import Sequential
+from component import Sensor, Sequential
 from optimization.target import Target
 
 _CAUSE_NOUNS: tuple[tuple[Noun, Verdict.Cause], ...] = (
@@ -109,14 +109,32 @@ def _chief(flow: TraceFlow) -> torch.Tensor:
     return sturdy_div(w.unsqueeze(-1).mul(h).sum(dim=(2, 3), keepdim=True), den)
 
 
-def blur_loss(flow: TraceFlow, weights: LossWeights) -> SystemFloatScalar:
-    """加权模糊：存活光线相对本视场主光线的均方偏差 (mm²)——纯成像质量。"""
+def blur_loss(flow: TraceFlow, seq: Sequential, weights: LossWeights) -> SystemFloatScalar:
+    """模糊损失：相对本视场主光线的均方偏差 (mm²)。
+
+    幸存光线按真实 r²（绕本视场主光线）；死亡光线每条按 **sensor 半径平方**
+    （取自链上末端 Sensor 的直径）计入——死亡不再免费：全死个体
+    blur = R_sensor² 直接垫底，1% 死亡约 +R²/100。链上无 Sensor 时退回
+    旧语义（仅幸存者加权平均）。
+    """
     h = flow.rays.points[..., :2]
     w = flow.verdict.hold
     r2 = h.sub(_chief(flow)).square().sum(dim=-1)
-    return sturdy_div(w.mul(r2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
-        weights.blur
-    )
+    dead_r2 = _dead_r2(seq)
+    if dead_r2 is None:
+        return sturdy_div(w.mul(r2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
+            weights.blur
+        )
+    r2 = torch.where(w, r2, dead_r2.view(-1, 1, 1, 1))
+    return r2.mean(dim=(1, 2, 3)).mul(weights.blur)
+
+
+def _dead_r2(seq: Sequential) -> SystemFloatScalar | None:
+    """末端 Sensor 的半径平方（死光线的缺失误差）；链上无 Sensor 返回 None。"""
+    for comp in reversed(list(seq)):
+        if isinstance(comp, Sensor):
+            return comp.shape.Diameter.mul(0.5).square()
+    return None
 
 
 def distortion_loss(
@@ -191,7 +209,7 @@ def total_loss(
     weights = weights or LossWeights()
     parts = {
         "effl": effl_loss(flow, target, weights),
-        "blur": blur_loss(flow, weights),
+        "blur": blur_loss(flow, seq, weights),
         "distortion": distortion_loss(flow, target, weights),
         "survival": survival_loss(flow, weights),
         "toll": toll_loss(flow, weights),

@@ -1,10 +1,11 @@
 """zmx2toml — 将 Zemax .zmx 处方转换为本项目的训练配置 TOML。
 
 用法:
-    python scripts/zmx2toml.py <file.zmx>
+    python scripts/zmx2toml.py <file.zmx> [out.toml]
 
-成功:TOML 打印到 stdout;被过滤:打印 ``SKIP <文件名>: <原因>`` 并以退出码 1 结束
-(不落盘、不建目录)。设计见 docs/superpowers/specs/2026-08-06-zmx2toml-design.md。
+成功:不给 out.toml 则打印到 stdout;给出则将 TOML 写入该路径(父目录不存在
+自动创建)并打印保存路径。被过滤:打印 ``SKIP <文件名>: <原因>``,退出码 1,
+不落盘、不建目录。设计见 docs/superpowers/specs/2026-08-06-zmx2toml-design.md。
 
 仅支持:STANDARD(球面/圆锥面)、EVENASPH(偶次非球面)、平面 STOP、像面;
 EFFL / F 数 / 视场角按推断链解析,材料一律 sellmeier 随机(只借 zmx 的结构)。
@@ -187,6 +188,18 @@ def infer_effl(zmx: Zmx, optical: list[Surface]) -> float:
     return effl
 
 
+def _snap_effl(effl: float) -> float:
+    """设计目标吸附:与最近整数相差 <1% 时取整。
+
+    计算值是处方的实际近轴焦距(含制造/换算噪声),优化目标应是设计意图
+    ——59.98 → 60、100.04 → 100;12.5、57.3 这类本真非整值保持不变。
+    """
+    nearest = round(effl)
+    if nearest > 0 and abs(effl - nearest) / effl < 0.01:
+        return float(nearest)
+    return effl
+
+
 def infer_fnumber(zmx: Zmx, optical: list[Surface], effl: float) -> float:
     if zmx.fnum and zmx.fnum > 0:
         f = zmx.fnum
@@ -254,9 +267,16 @@ def _alpha_bounds(s: Surface, D: int, jmax: int) -> str:
     return f"[{_f(-b)}, {_f(b)}]"
 
 
-def _scaled(fixed: float, m: float, rel: float) -> float:
-    """随 |mean| 放缩的 std:max(fixed, rel×|m|)——大口径非球面的归一化 α 可达 O(10)。"""
-    return max(fixed, rel * abs(m))
+def _init_std(mean: float, floor: float) -> float:
+    """初始化 std:3σ ≈ ±50%(= |mean|/6);mean≈0 时取绝对下限 floor。"""
+    return max(abs(mean) / 6.0, floor)
+
+
+def _domain_cmax(s: Surface, D: int) -> float | None:
+    """半球域曲率上限 1/(√(1+κ)·半口径);1+κ≤0(双曲)无域限返回 None。"""
+    if 1.0 + s.coni <= 0.0:
+        return None
+    return 1.0 / (math.sqrt(1.0 + s.coni) * (D / 2))
 
 
 def _header(stem: str, effl: float, fnum: float, theta: float) -> str:
@@ -273,7 +293,7 @@ generation = 120
 
 [[optimizer]]
 type = "adam"
-step = 300
+step = 200
 scheduler = "cosine"
 grad_norm = 10.0
 lr = {{ curvature = 2e-4, thickness = 5e-2, diameter = 2e-4, kappa = 1e-3, alpha = 1e-3 }}
@@ -283,6 +303,8 @@ effl = 0.01
 blur = 1.0
 distortion = 1.0
 survival = 0.01
+thickness = 10.0
+curvature = 10.0
 
 [train]
 device = "auto"
@@ -327,44 +349,53 @@ def _shape_of(s: Surface) -> tuple[str, int]:
 def _refractor(s: Surface, *, allow_negative: bool) -> str:
     D = _diameter_of(s)
     shape, jmax = _shape_of(s)
+    c = round(s.curv, 3)
+
+    d_std = _init_std(D, 0.1)
+    c_std = _init_std(c, 0.001)
+    cmax = _domain_cmax(s, D)
+    if cmax is not None:
+        c_std = min(c_std, max(0.005, (0.9 * cmax - abs(c)) / 3.0))
+    k_std = _init_std(s.coni, 0.01) if shape != "sphere" else 0.0
+
     lines = ["[[component]]", 'type = "refractor"', f'shape = "{shape}"']
     if allow_negative:
         lines.append("solver = { allow_negative = true }")
-    lines.append(f'diameter = {{ method = "normal", mean = {_f(D)}, std = 1.0 }}')
     lines.append(
-        f'curvature = {{ method = "normal", mean = {_f(round(s.curv, 3))}, std = 0.1 }}'
+        f'diameter = {{ method = "normal", mean = {_f(D)}, std = {_f(d_std)} }}'
+    )
+    lines.append(
+        f'curvature = {{ method = "normal", mean = {_f(c)}, std = {_f(c_std)} }}'
     )
     if shape != "sphere":
         lines.append(
-            f'kappa = {{ method = "normal", mean = {_f(s.coni)}, std = 0.1 }}'
+            f'kappa = {{ method = "normal", mean = {_f(s.coni)}, std = {_f(k_std)} }}'
         )
+    a_std_worst = 0.0
     if shape == "asphere":  # α = A_j × (D/2)^{2j}(归一化到机械口径)
         rho = D / 2
         for j in range(2, jmax + 1):
             a = s.parms.get(j, 0.0) * rho ** (2 * j)
+            a_std = _init_std(a, 0.001)
+            a_std_worst = max(a_std_worst, a_std)
             lines.append(
-                f'alpha{2 * j} = {{ method = "normal", mean = {_f(a)}, std = {_f(round(_scaled(0.05, a, 0.1), 3))} }}'
+                f'alpha{2 * j} = {{ method = "normal", mean = {_f(a)}, std = {_f(a_std)} }}'
             )
     lines.append(_material_of(s))
 
     train = ["curvature"]
-    mutate = ["curvature = 0.01"]
-    bounds = [f"curvature = {_bounds(round(s.curv, 3), -0.1, 0.1)}"]
+    mutate = [f"curvature = {_f(c_std / 10)}"]
+    bounds = [f"curvature = {_bounds(c, -0.1, 0.1)}"]
     if shape != "sphere":
         train.append("kappa")
-        mutate.append("kappa = 0.05")
+        mutate.append(f"kappa = {_f(k_std / 10)}")
         bounds.append(f"kappa = {_bounds(s.coni, -5.0, 5.0)}")
     if shape == "asphere":
         train.append("alpha")
-        rho = D / 2
-        worst = max(
-            (abs(s.parms.get(j, 0.0) * rho ** (2 * j)) for j in range(2, jmax + 1)),
-            default=0.0,
-        )
-        mutate.append(f"alpha = {_f(round(_scaled(0.01, worst, 0.05), 3))}")
+        mutate.append(f"alpha = {_f(a_std_worst / 10)}")
         bounds.append(f"alpha = {_alpha_bounds(s, D, jmax)}")
     train.append("diameter")
-    mutate.append("diameter = 0.1")
+    mutate.append(f"diameter = {_f(d_std / 10)}")
     if s.glass is not None:
         mutate.append("material = 2.0")
     bounds.append(f"diameter = {_diameter_bounds(D)}")
@@ -376,13 +407,14 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
 
 def _stop(s: Surface) -> str:
     D = _diameter_of(s)
+    std = _init_std(D, 0.1)
     return "\n".join(
         [
             "[[component]]",
             'type = "stop"',
-            f'diameter = {{ method = "normal", mean = {_f(D)}, std = 1.0 }}',
+            f'diameter = {{ method = "normal", mean = {_f(D)}, std = {_f(std)} }}',
             "train = { diameter = true }",
-            "mutate = { diameter = 0.1 }",
+            f"mutate = {{ diameter = {_f(std / 10)} }}",
             f"bounds = {{ diameter = {_diameter_bounds(D)} }}",
         ]
     )
@@ -391,20 +423,22 @@ def _stop(s: Surface) -> str:
 def _gap(s: Surface, *, last: bool, effl: float) -> str:
     t = round(s.disz or 0.0, 3)
     if last:
-        std, hi = 5.0, float(math.ceil(1.7 * effl))
+        hi = float(math.ceil(1.7 * effl))
     elif s.glass is not None:
-        std, hi = 1.0, 15.0
+        hi = 15.0
     else:
-        std, hi = 1.0, 20.0
-    lo = min(0.3, round(0.5 * t, 3))  # 走廊须包含 mean(超薄胶合层)
-    hi = max(hi, round(1.5 * t, 3))
+        hi = 20.0
+    lo = 0.5 if t >= 0.5 else round(0.5 * t, 3)  # 超薄层按 50% 抖动压低下限
+    if t > hi:
+        hi = round(1.5 * t, 3)  # 超厚层按 50% 抖动顶出上限
+    std = _init_std(t, 0.05)
     return "\n".join(
         [
             "[[component]]",
             'type = "gap"',
             f'thickness = {{ method = "normal", mean = {_f(t)}, std = {_f(std)} }}',
             "train = { thickness = true }",
-            "mutate = { thickness = 0.2 }",
+            f"mutate = {{ thickness = {_f(std / 10)} }}",
             f"bounds = {{ thickness = [{_f(lo)}, {_f(hi)}] }}",
         ]
     )
@@ -450,7 +484,7 @@ def convert(path: Path) -> str:
         if s.parms.get(1, 0.0) != 0.0:
             s.parms = {}  # r² 项无处安放:全部偶次项置 0,退化为 conic/sphere
 
-    effl = infer_effl(zmx, optical)
+    effl = _snap_effl(infer_effl(zmx, optical))
     fnum = infer_fnumber(zmx, optical, effl)
     theta = infer_fov(zmx, effl)
 
@@ -468,15 +502,22 @@ def convert(path: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    if len(argv) not in (2, 3):
         print(__doc__)
         return 2
     path = Path(argv[1])
     try:
-        print(convert(path))
+        toml = convert(path)
     except Skip as e:
         print(f"SKIP {path.name}: {e}")
         return 1
+    if len(argv) == 3:
+        out = Path(argv[2])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(toml, encoding="utf-8")
+        print(out)
+    else:
+        print(toml)
     return 0
 
 
