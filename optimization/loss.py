@@ -197,6 +197,9 @@ def total_loss(
         "toll": toll_loss(flow, weights),
         "bounds": bounds_loss(seq, blocks, weights),
     }
+    # 死光线的发散几何（NaN 命中点 / 天文数字距离）会以 0×NaN、0×inf 形式
+    # 污染加权求和——逐项归为 0：该个体的该项视为无信号，排序由其余分项决定。
+    parts = {k: torch.nan_to_num(v, nan=0.0) for k, v in parts.items()}
     total = torch.zeros_like(parts["blur"])
     for p in parts.values():
         total = total.add(p)

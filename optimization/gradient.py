@@ -80,6 +80,7 @@ _NAME_NOUNS = (
     term.KAPPA,
     term.ALPHA,
     term.THICKNESS,
+    term.DIAMETER,
 )
 
 
@@ -156,6 +157,13 @@ class GradientOptimizer:
             flow = seq()
             loss_total, parts = total_loss(flow, seq, target, blocks, weights)
             loss_total.mean().backward()
+
+            # 反向端兜底：上游掩码后的 0 × NaN-Jacobian 仍可能产出 NaN 梯度
+            # （前向损失有限≠反向干净），归为 0 即本步不更新该参数；
+            # inf 梯度由 clip_grad_norm_ 收敛，无需映射。
+            for param in seq.parameters():
+                if param.grad is not None:
+                    torch.nan_to_num_(param.grad, nan=0.0)
 
             if opts.grad_norm is not None:
                 torch.nn.utils.clip_grad_norm_(seq.parameters(), opts.grad_norm)

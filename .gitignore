@@ -224,3 +224,7 @@ node_modules/
 
 demo/
 zebase/
+docs/
+temp/
+Navigation/
+tests/
