@@ -17,13 +17,19 @@ class Callback(Protocol):
 
 
 class LossHistory:
-    def __init__(self) -> None:
+    """损失历史:step 级记录按 ``every`` 稀释(默认每 20 步一条),代末必记。"""
+
+    def __init__(self, every: int = 20) -> None:
+        if every < 1:
+            raise ValueError(f"every must be >= 1, got {every}")
+        self.every = every
         self.records: list[dict[str, Any]] = []
 
     def on_step_end(
         self, gen: int, step: int, stage: str, metrics: dict[str, Any]
     ) -> None:
-        self.records.append({"gen": gen, "step": step, "stage": stage, **metrics})
+        if (step + 1) % self.every == 0:
+            self.records.append({"gen": gen, "step": step, "stage": stage, **metrics})
 
     def on_gen_end(self, gen: int, metrics: dict[str, Any]) -> None:
         self.records.append({"gen": gen, "step": -1, "stage": "ga", **metrics})
