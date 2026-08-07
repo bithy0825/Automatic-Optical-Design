@@ -90,7 +90,9 @@ for cfg in "${configs[@]}"; do
   dir=$(dirname "$cfg")
   base=$(name_of "$cfg")
 
-  have=$(compgen -G "$dir/${base}_*.pth" | wc -l)
+  # 每个 config 独占一个目录:目录里任何 .pth 都是它的优化结果
+  # (兼容早期命名不一致的产物,如 "A_001.pth_27083.pth")
+  have=$(compgen -G "$dir/*.pth" | wc -l)
   need=$((want - have))
   if [ "$need" -le 0 ]; then
     echo "[$i/$total] skip  $base (已有 $have 个结果)"
