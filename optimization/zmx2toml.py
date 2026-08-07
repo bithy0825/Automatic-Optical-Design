@@ -54,6 +54,7 @@ class Zmx:
     fields: list[float] = field(default_factory=list)  # XFLN/XFLD/YFLN/YFLD 汇总
     merit_effl: float | None = None
     unit: str = "MM"
+    mnum: int = 1  # MNUM:多重结构的配置数(>1 = 变焦/多位置,过滤)
     surfaces: list[Surface] = field(default_factory=list)  # 含 OBJ(0) 与 IMA(末)
 
 
@@ -108,6 +109,8 @@ def _parse_header(zmx: Zmx, key: str, tokens: list[str]) -> None:
                 zmx.ftyp = int(_float(tokens[1]))
             case "UNIT":
                 zmx.unit = tokens[1].upper()
+            case "MNUM":
+                zmx.mnum = int(_float(tokens[1]))
             case "XFLN" | "XFLD" | "YFLN" | "YFLD":
                 zmx.fields.extend(_float(t) for t in tokens[1:])
             case "EFFL":  # 评价函数 EFFL 操作数:第 7 个数值为目标值
@@ -118,10 +121,18 @@ def _parse_header(zmx: Zmx, key: str, tokens: list[str]) -> None:
         pass
 
 
+def _read_text(path: Path) -> str:
+    """读取 zmx/len 文本:UTF-16(带 BOM)与 UTF-8/ASCII 自适应。"""
+    raw = path.read_bytes()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
 def parse_zmx(path: Path) -> Zmx:
     zmx = Zmx()
     cur: Surface | None = None
-    for raw in path.read_text(errors="replace").splitlines():
+    for raw in _read_text(path).splitlines():
         if not raw.strip():
             continue
         indented = raw[0] in " \t"
@@ -217,22 +228,26 @@ def infer_fnumber(zmx: Zmx, optical: list[Surface], effl: float) -> float:
     return f
 
 
+def _auto_fov(effl: float) -> float:
+    """视场缺失/失效时自动推断:全画幅半对角线 21.6mm 按焦距缩放,钳 [3°, 45°]。"""
+    return min(45.0, max(3.0, math.degrees(math.atan(21.6 / effl))))
+
+
 def infer_fov(zmx: Zmx, effl: float) -> float:
-    """最大半视场角(度)。"""
+    """最大半视场角(度);文件无视场信息或推断越界时按焦距自动推断。"""
     hmax = max((abs(v) for v in zmx.fields), default=0.0)
-    if hmax <= 0:
-        raise Skip("zero field of view")
-    if zmx.ftyp == 0:  # 角度(度)
-        theta = hmax
-    elif zmx.ftyp == 1:  # 物高 → 按物距换算
-        obj = zmx.surfaces[0].disz
-        if not obj or obj <= 0:
-            raise Skip("cannot resolve field angle")
-        theta = math.degrees(math.atan(hmax / obj))
-    else:  # 2/3:像高 → 按焦距换算
-        theta = math.degrees(math.atan(hmax / effl))
+    theta = 0.0
+    if hmax > 0:
+        if zmx.ftyp == 0:  # 角度(度)
+            theta = hmax
+        elif zmx.ftyp == 1:  # 物高 → 按物距换算
+            obj = zmx.surfaces[0].disz
+            if obj and obj > 0:
+                theta = math.degrees(math.atan(hmax / obj))
+        else:  # 2/3:像高 → 按焦距换算
+            theta = math.degrees(math.atan(hmax / effl))
     if not 0 < theta < 90:
-        raise Skip("cannot resolve field angle")
+        theta = _auto_fov(effl)
     return theta
 
 
@@ -241,6 +256,8 @@ def infer_fov(zmx: Zmx, effl: float) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _SENSOR_DIAGONALS = (7.7, 9.5, 16.0, 21.6, 28.3, 34.5, 43.3, 55.0, 79.2, 87.3)
+
+_UNIT_SCALE = {"MM": 1.0, "CM": 10.0, "IN": 25.4, "METER": 1000.0}  # → mm
 
 
 def _f(x: float) -> str:
@@ -466,8 +483,21 @@ def _sensor(effl: float, theta: float) -> str:
 
 def convert(path: Path) -> str:
     zmx = parse_zmx(path)
-    if zmx.unit != "MM":
-        raise Skip(f"non-MM unit: {zmx.unit}")
+    scale = _UNIT_SCALE.get(zmx.unit)
+    if scale is None:
+        raise Skip(f"unknown unit: {zmx.unit}")
+    if scale != 1.0:  # 统一折算成 mm(曲率除,长度乘;视场值按 FTYP 语义)
+        for s in zmx.surfaces:
+            s.curv /= scale
+            if s.disz is not None:
+                s.disz *= scale
+            s.diam *= scale
+        if zmx.merit_effl is not None:
+            zmx.merit_effl *= scale
+        if zmx.ftyp != 0:
+            zmx.fields = [v * scale for v in zmx.fields]
+    if zmx.mnum > 1:
+        raise Skip(f"multi-configuration (MNUM {zmx.mnum})")
     if len(zmx.surfaces) < 3:
         raise Skip("no optical surfaces")
 
@@ -479,8 +509,14 @@ def convert(path: Path) -> str:
             raise Skip(f"mirror surface (surf {s.index})")
         if s.disz is None:
             raise Skip(f"infinite thickness (surf {s.index})")
-        if s.diam <= 0:
-            raise Skip(f"zero diameter (surf {s.index})")
+        if s.diam <= 0:  # 自动口径:以 2×EPD 兜底全直径,且不越半球域
+            if zmx.enpd is None or zmx.enpd <= 0:
+                raise Skip(f"zero diameter (surf {s.index})")
+            s.diam = zmx.enpd
+            if s.curv != 0.0:
+                cap = math.floor(1.8 / abs(s.curv))
+                if math.ceil(2.0 * s.diam) > cap:
+                    s.diam = max(cap, 1) / 2.0
         if s.parms.get(1, 0.0) != 0.0:
             s.parms = {}  # r² 项无处安放:全部偶次项置 0,退化为 conic/sphere
 

@@ -37,7 +37,7 @@ if [ ! -d "$in_dir" ]; then
 fi
 
 shopt -s nullglob nocaseglob
-files=("$in_dir"/*.len)
+mapfile -t files < <(find "$in_dir" -type f -iname '*.len' | sort)
 if [ ${#files[@]} -eq 0 ]; then
   echo "no .len files in $in_dir"
   exit 1

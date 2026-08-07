@@ -31,7 +31,7 @@ _UNIT_SCALE = 10.0  # UNI 1.0 = cm → mm
 
 # 面块内可识别的关键字;其余一律视为不可表达而过滤
 _KNOWN_SURFACE_KEYS = {
-    "AIR", "GLA", "RD", "TH", "AP", "AST",
+    "AIR", "GLA", "RD", "TH", "AP", "AST", "CC",
     "WV", "WV2", "WV3", "WW", "END", "PY",
 }
 
@@ -62,6 +62,8 @@ def _parse_block(s: Surface, key: str, tokens: list[str]) -> None:
                 s.disz = float(tokens[1]) * _UNIT_SCALE
             case "AP":
                 s.diam = float(tokens[1]) * _UNIT_SCALE
+            case "CC":
+                s.coni = float(tokens[1])  # OSLO 圆锥常数,约定与 zmx CONI 相同
             case "AST":
                 s.is_stop = True
     except (IndexError, ValueError):
@@ -70,7 +72,7 @@ def _parse_block(s: Surface, key: str, tokens: list[str]) -> None:
 
 def parse_len(path: Path) -> tuple[list[Surface], float | None, float | None, float | None, float | None]:
     """返回 (光学面列表, 头行 EFFL[mm], EBR[mm], ANG[度], 像面 AP[mm])。"""
-    text = path.read_text(errors="replace")
+    text = z2t._read_text(path)
     m = re.search(r'^UNI\s+([\d.eE+-]+)', text, re.M)
     if not m or abs(float(m.group(1)) - 1.0) > 1e-9:
         raise Skip("unknown unit (UNI != 1.0)")
@@ -98,8 +100,6 @@ def parse_len(path: Path) -> tuple[list[Surface], float | None, float | None, fl
                 continue
             if key not in _KNOWN_SURFACE_KEYS:
                 raise Skip(f"unsupported surface data: {key} (block {i})")
-            if key == "PY":
-                raise Skip("paraxial surface (PY)")
             _parse_block(s, key, tokens)
         surfaces.append(s)
 
@@ -142,8 +142,7 @@ def _infer_fov(effl: float, ang: float | None, image_ap: float | None) -> float:
         return ang
     if image_ap is not None:  # 像面 AP = 像圈半径
         return math.degrees(math.atan(image_ap / effl))
-    # 自动推断:全画幅半对角线 21.6mm 按焦距缩放,钳到 [3°, 45°]
-    return min(45.0, max(3.0, math.degrees(math.atan(21.6 / effl))))
+    return z2t._auto_fov(effl)  # 无视场信息:按焦距自动推断
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
