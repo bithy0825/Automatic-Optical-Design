@@ -437,14 +437,16 @@ def _stop(s: Surface, *, front: bool = False) -> str:
 
 
 def _gap(s: Surface, *, last: bool, effl: float) -> str:
-    t = round(s.disz or 0.0, 3)
+    # 制造下限 0.1mm:过薄间隙的初始值与下界同时抬升——否则优化器会把
+    # 薄间隙推向无意义的亚 0.1mm 结构(处方里这种值多为接触/胶合记法)
+    t = max(round(s.disz or 0.0, 3), 0.1)
     if last:
         hi = float(math.ceil(1.7 * effl))
     elif s.glass is not None:
         hi = 15.0
     else:
         hi = 20.0
-    lo = 0.5 if t >= 0.5 else round(0.5 * t, 3)  # 超薄层按 50% 抖动压低下限
+    lo = 0.5 if t >= 0.5 else 0.1
     if t > hi:
         hi = round(1.5 * t, 3)  # 超厚层按 50% 抖动顶出上限
     std = _init_std(t, 0.1)
