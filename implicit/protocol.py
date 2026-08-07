@@ -35,7 +35,7 @@ class NewtonSolverOptions:
         ZERO = "zero"
 
     tol: float = 1e-4
-    num_iter: int = 8
+    num_iter: int = 6
     damping: float = 0.95
     allow_negative: bool = False
     init_method: Init = Init.CLOSEST

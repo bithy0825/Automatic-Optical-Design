@@ -101,10 +101,14 @@ class GeneticAlgorithm:
                 )
 
             if callbacks:
-                metrics = {k: v.detach().float().mean().item() for k, v in parts.items()}
-                metrics["loss"] = loss.float().mean().item()
+                # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
+                keys = list(parts) + ["loss"]
+                vals = torch.stack(
+                    [parts[k].detach().float().mean() for k in parts]
+                    + [loss.float().mean()]
+                ).tolist()
                 for cb in callbacks:
-                    cb.on_gen_end(gen, metrics)
+                    cb.on_gen_end(gen, dict(zip(keys, vals)))
 
 
 def _damping(

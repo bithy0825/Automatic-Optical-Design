@@ -173,13 +173,12 @@ class GradientOptimizer:
                 scheduler.step()
 
             if callbacks:
+                # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
+                keys = list(parts)
+                vals = torch.stack([parts[k].detach().mean() for k in keys]).tolist()
+                metrics = dict(zip(keys, vals))
                 for cb in callbacks:
-                    cb.on_step_end(
-                        gen,
-                        step,
-                        self._stage,
-                        {k: v.detach().mean().item() for k, v in parts.items()},
-                    )
+                    cb.on_step_end(gen, step, self._stage, metrics)
 
     def _make_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler | None:
         opts = self.options

@@ -71,7 +71,10 @@ class SimulatedAnnealing:
             current = torch.where(accept, trial_loss, current)
 
             if callbacks:
-                metrics = {k: v.detach().mean().item() for k, v in parts.items()}
+                # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
+                keys = list(parts)
+                vals = torch.stack([parts[k].detach().mean() for k in keys]).tolist()
+                metrics = dict(zip(keys, vals))
                 metrics["temperature"] = T
                 for cb in callbacks:
                     cb.on_step_end(gen, step_m1, "SA", metrics)
