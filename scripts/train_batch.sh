@@ -82,8 +82,11 @@ for cfg in "${configs[@]}"; do
     j=$((j + 1))
     out="$dir/${base}_${s}.pth"
     hist="$dir/${base}_${s}.json"
+    # 进度条默认开(PROGRESS=0 关闭,重定向到日志文件时建议关)
+    extra=()
+    [ "${PROGRESS:-1}" = "0" ] && extra+=("--no-progress")
     echo "[$i/$total] train $base seed=$s ($j/$need)"
-    if "$PY" "$trainer" "$cfg" --seed "$s" --output "$out" --history "$hist" --no-progress; then
+    if "$PY" "$trainer" "$cfg" --seed "$s" --output "$out" --history "$hist" "${extra[@]}"; then
       echo "[$i/$total] done  $base seed=$s"
     else
       echo "[$i/$total] FAIL  $base seed=$s"
