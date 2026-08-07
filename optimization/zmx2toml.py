@@ -285,8 +285,8 @@ def _alpha_bounds(s: Surface, D: int, jmax: int) -> str:
 
 
 def _init_std(mean: float, floor: float) -> float:
-    """初始化 std:3σ ≈ ±50%(= |mean|/6);mean≈0 时取绝对下限 floor。"""
-    return max(abs(mean) / 6.0, floor)
+    """初始化 std:3σ ≈ ±100%(= |mean|/3);mean≈0 时取绝对下限 floor。"""
+    return max(abs(mean) / 3.0, floor)
 
 
 def _domain_cmax(s: Surface, D: int) -> float | None:
@@ -319,7 +319,6 @@ lr = {{ curvature = 2e-4, thickness = 5e-2, diameter = 2e-4, kappa = 1e-3, alpha
 effl = 0.01
 blur = 1.0
 distortion = 1.0
-survival = 0.01
 thickness = 10.0
 curvature = 10.0
 
@@ -369,11 +368,11 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
     c = round(s.curv, 3)
 
     d_std = _init_std(D, 0.1)
-    c_std = _init_std(c, 0.001)
+    c_std = _init_std(c, 0.01)
     cmax = _domain_cmax(s, D)
     if cmax is not None:
         c_std = min(c_std, max(0.005, (0.9 * cmax - abs(c)) / 3.0))
-    k_std = _init_std(s.coni, 0.01) if shape != "sphere" else 0.0
+    k_std = _init_std(s.coni, 0.05) if shape != "sphere" else 0.0
 
     lines = ["[[component]]", 'type = "refractor"', f'shape = "{shape}"']
     if allow_negative:
@@ -401,18 +400,18 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
     lines.append(_material_of(s))
 
     train = ["curvature"]
-    mutate = [f"curvature = {_f(c_std / 10)}"]
+    mutate = [f"curvature = {_f(c_std / 2)}"]
     bounds = [f"curvature = {_bounds(c, -0.1, 0.1)}"]
     if shape != "sphere":
         train.append("kappa")
-        mutate.append(f"kappa = {_f(k_std / 10)}")
+        mutate.append(f"kappa = {_f(k_std / 2)}")
         bounds.append(f"kappa = {_bounds(s.coni, -5.0, 5.0)}")
     if shape == "asphere":
         train.append("alpha")
-        mutate.append(f"alpha = {_f(a_std_worst / 10)}")
+        mutate.append(f"alpha = {_f(a_std_worst / 2)}")
         bounds.append(f"alpha = {_alpha_bounds(s, D, jmax)}")
     train.append("diameter")
-    mutate.append(f"diameter = {_f(d_std / 10)}")
+    mutate.append(f"diameter = {_f(d_std / 2)}")
     if s.glass is not None:
         mutate.append("material = 2.0")
     bounds.append(f"diameter = {_diameter_bounds(D)}")
@@ -431,7 +430,7 @@ def _stop(s: Surface) -> str:
             'type = "stop"',
             f'diameter = {{ method = "normal", mean = {_f(D)}, std = {_f(std)} }}',
             "train = { diameter = true }",
-            f"mutate = {{ diameter = {_f(std / 10)} }}",
+            f"mutate = {{ diameter = {_f(std / 2)} }}",
             f"bounds = {{ diameter = {_diameter_bounds(D)} }}",
         ]
     )
@@ -448,14 +447,14 @@ def _gap(s: Surface, *, last: bool, effl: float) -> str:
     lo = 0.5 if t >= 0.5 else round(0.5 * t, 3)  # 超薄层按 50% 抖动压低下限
     if t > hi:
         hi = round(1.5 * t, 3)  # 超厚层按 50% 抖动顶出上限
-    std = _init_std(t, 0.05)
+    std = _init_std(t, 0.1)
     return "\n".join(
         [
             "[[component]]",
             'type = "gap"',
             f'thickness = {{ method = "normal", mean = {_f(t)}, std = {_f(std)} }}',
             "train = { thickness = true }",
-            f"mutate = {{ thickness = {_f(std / 10)} }}",
+            f"mutate = {{ thickness = {_f(std / 2)} }}",
             f"bounds = {{ thickness = [{_f(lo)}, {_f(hi)}] }}",
         ]
     )

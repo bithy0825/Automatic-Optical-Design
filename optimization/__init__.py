@@ -15,7 +15,6 @@ from optimization.loss import (
     bounds_loss,
     distortion_loss,
     effl_loss,
-    survival_loss,
     toll_loss,
     total_loss,
 )
@@ -40,7 +39,6 @@ __all__ = [
     "bounds_loss",
     "distortion_loss",
     "effl_loss",
-    "survival_loss",
     "toll_loss",
     "total_loss",
     # target
