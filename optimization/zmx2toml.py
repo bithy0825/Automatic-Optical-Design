@@ -411,7 +411,7 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
         mutate.append(f"alpha = {_f(a_std_worst / 2)}")
         bounds.append(f"alpha = {_alpha_bounds(s, D, jmax)}")
     train.append("diameter")
-    mutate.append(f"diameter = {_f(d_std / 2)}")
+    mutate.append(f"diameter = {_f(min(d_std / 2, 1.0))}")
     if s.glass is not None:
         mutate.append("material = 2.0")
     bounds.append(f"diameter = {_diameter_bounds(D)}")
@@ -421,19 +421,19 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
     return "\n".join(lines)
 
 
-def _stop(s: Surface) -> str:
+def _stop(s: Surface, *, front: bool = False) -> str:
     D = _diameter_of(s)
     std = _init_std(D, 0.1)
-    return "\n".join(
-        [
-            "[[component]]",
-            'type = "stop"',
-            f'diameter = {{ method = "normal", mean = {_f(D)}, std = {_f(std)} }}',
-            "train = { diameter = true }",
-            f"mutate = {{ diameter = {_f(std / 2)} }}",
-            f"bounds = {{ diameter = {_diameter_bounds(D)} }}",
-        ]
-    )
+    lines = ["[[component]]", 'type = "stop"']
+    if front:  # 前置光阑与光源同面,t≈0 的数值噪声需允许负距离解
+        lines.append("solver = { allow_negative = true }")
+    lines += [
+        f'diameter = {{ method = "normal", mean = {_f(D)}, std = {_f(std)} }}',
+        "train = { diameter = true }",
+        f"mutate = {{ diameter = {_f(min(std / 2, 1.0))} }}",
+        f"bounds = {{ diameter = {_diameter_bounds(D)} }}",
+    ]
+    return "\n".join(lines)
 
 
 def _gap(s: Surface, *, last: bool, effl: float) -> str:
@@ -524,13 +524,13 @@ def convert(path: Path) -> str:
     theta = infer_fov(zmx, effl)
 
     parts = [_header(path.stem, effl, fnum, theta)]
-    seen_refractor = False
+    # allow_negative 只给链上第一个面(与光源同面,t≈0 的数值噪声/首面负曲率
+    # 的合法负根);中间面负距离=X 型打架,必须保持判死
     for i, s in enumerate(optical):
         if s.is_stop and s.curv == 0.0:
-            parts.append(_stop(s))
+            parts.append(_stop(s, front=i == 0))
         else:
-            parts.append(_refractor(s, allow_negative=not seen_refractor))
-            seen_refractor = True
+            parts.append(_refractor(s, allow_negative=i == 0))
         parts.append(_gap(s, last=i == len(optical) - 1, effl=effl))
     parts.append(_sensor(effl, theta))
     return "\n\n".join(parts) + "\n"

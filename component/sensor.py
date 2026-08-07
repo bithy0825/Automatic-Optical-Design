@@ -2,31 +2,27 @@ from typing import Any, Self, override
 from collections.abc import Mapping
 from dataclasses import replace
 
-import torch
-
-from core import OpticalModule, SystemBoolScalar, SystemFloatScalar, TraceFlow, term, parse_param
+from core import OpticalModule, SystemBoolScalar, TraceFlow, term
 from component.protocol import Component
-from shape import Disk
+from shape import Shape
 
 
 class Sensor(Component):
-    """像面传感器：终端元件，光线求交后落在面上止步。
+    """像面传感器：终端元件（一个 Shape，通常平面 Disk），光线求交后落在面上止步。
 
     方向保持不变（传感器不改变传播，只记录落点）；
     孔径外的光线由机械孔径裁决判死。无可变异参数
     （``mutable`` 为空，GA 操作对直径的重排/填充由默认实现完成）。
 
     Args:
-        diameter: 传感器直径 (mm)，标量或 (P,) 张量；内部包装为 :class:`Disk`。
+        shape: 传感面面形。
     """
 
     kind = term.SENSOR
 
-    def __init__(self, diameter: SystemFloatScalar | float) -> None:
+    def __init__(self, *, shape: Shape) -> None:
         super().__init__()
-        if isinstance(diameter, (int, float)):
-            diameter = torch.tensor([float(diameter)])
-        self.shape = Disk(diameter)
+        self.shape = shape
 
     @override
     def forward(self, flow: TraceFlow) -> TraceFlow:
@@ -38,16 +34,21 @@ class Sensor(Component):
     @classmethod
     @override
     def from_options(cls, population: int, options: Mapping[str, Any]) -> Self:
-        return cls(parse_param(options, term.DIAMETER, population))
+        """面形由配置构造（同 Refractor）；``shape`` 键缺省为 ``disk``。"""
+        return cls(shape=Shape.from_options(population, {"shape": "disk", **options}))
 
     @classmethod
     @override
     def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
-        """逐个体选择传感面直径。"""
+        """面形多态分派各自的 ``where``（语义同 Refractor）。"""
         OpticalModule._check_operands(mask, new, old)
-        return cls(torch.where(mask, new.shape.Diameter, old.shape.Diameter))
+        if type(new.shape) is not type(old.shape):
+            raise TypeError(
+                f"where: shape {type(new.shape).__name__} vs {type(old.shape).__name__}"
+            )
+        return cls(shape=type(new.shape).where(mask, new.shape, old.shape))
 
     @override
     def clone(self) -> Self:
-        """深拷贝：以当前直径重建（传感器无材料）。"""
-        return type(self)(self.shape.Diameter.clone())
+        """深拷贝：面形克隆（求解器与 trainable 语义随之保留）。"""
+        return type(self)(shape=self.shape.clone())

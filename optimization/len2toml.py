@@ -174,17 +174,22 @@ def convert(path: Path) -> str:
     theta = _infer_fov(effl, ang, image_ap)
 
     parts = [z2t._header(path.stem, effl, fnum, theta)]
-    seen_refractor = False
+    at_origin = True  # 仍未离开光源平面(之前只有零厚度哑面)
+    surfaced = False  # 尚未发出任何面;allow_negative 只给光源平面上的第一个面
     for i, s in enumerate(optical):
         is_last = i == len(optical) - 1
+        first = at_origin and not surfaced
         if s.is_stop and s.curv == 0.0:
-            parts.append(z2t._stop(s))
+            parts.append(z2t._stop(s, front=first))
+            surfaced = True
         elif s.glass is not None or s.curv != 0.0:
-            parts.append(z2t._refractor(s, allow_negative=not seen_refractor))
-            seen_refractor = True
+            parts.append(z2t._refractor(s, allow_negative=first))
+            surfaced = True
         # 平面空气哑面(无 AST):删面,gap 照出(厚度为 0 时整块跳过)
         if is_last or (s.disz or 0.0) > 0 or s.glass is not None or s.curv != 0.0 or s.is_stop:
             parts.append(z2t._gap(s, last=is_last, effl=effl))
+            if (s.disz or 0.0) > 0:
+                at_origin = False
     parts.append(z2t._sensor(effl, theta))
     return "\n\n".join(parts) + "\n"
 
