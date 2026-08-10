@@ -2,7 +2,15 @@
 
 import argparse
 
-from optimization import build_sequential, build_target, load, load_config
+import torch
+
+from optimization import (
+    LossWeights,
+    build_sequential,
+    build_target,
+    load,
+    load_config,
+)
 from visualization.server import serve
 
 
@@ -19,11 +27,20 @@ def main() -> None:
 
     if args.pth:
         seq, target = load(args.pth)
+        cfg, _ = torch.load(args.pth, weights_only=True, map_location="cpu")
     else:
         cfg = load_config(args.config)
         target = build_target(cfg)
         seq = build_sequential(cfg, target)
-    serve(seq, target=target, port=args.port, open_browser=args.open)
+    weights = LossWeights.from_options(cfg)
+    serve(
+        seq,
+        target=target,
+        blocks=cfg["component"],
+        weights=weights,
+        port=args.port,
+        open_browser=args.open,
+    )
 
 
 if __name__ == "__main__":

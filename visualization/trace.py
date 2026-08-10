@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 import torch
@@ -18,6 +19,8 @@ from component.protocol import Component
 from core import TraceFlow, Transformer
 from core.sturdy_math import sturdy_div
 from implicit.protocol import FieldResult
+from optimization.loss import LossWeights, total_loss
+from optimization.target import Target
 from sampling import SampleOptions
 from shape import Shape
 from visualization.protocol import pack
@@ -237,10 +240,24 @@ def _check_pop(pop: int, population: int) -> None:
 
 
 class TraceCache:
-    """按视图参数缓存全种群追迹;打包时按 pop 切片。"""
+    """按视图参数缓存全种群追迹;打包时按 pop 切片。
 
-    def __init__(self, seq: Sequential) -> None:
+    *target*/*blocks*/*weights* 给出时,另缓存一次原始采样口径的
+    ``total_loss`` 逐分项结果(与训练口径一致),供 layout_packet 携带。
+    """
+
+    def __init__(
+        self,
+        seq: Sequential,
+        target: Target | None = None,
+        blocks: Sequence[Mapping[str, Any]] | None = None,
+        weights: LossWeights | None = None,
+    ) -> None:
         self._seq = seq
+        self._target = target
+        self._blocks = blocks
+        self._weights = weights
+        self._losses: dict[str, np.ndarray] | None = None
         self._layout: dict[int, LayoutData] = {}
         self._spot: dict[tuple[int, str], SpotData] = {}
         # 系统总长:首个折射面顶点 → 传感器,即其后的全部 gap 厚度之和(逐 pop)
@@ -253,6 +270,18 @@ class TraceCache:
             elif isinstance(comp, Gap) and seen_refractor:
                 total = total.add(comp.Thickness.detach().view(P, -1).sum(dim=1))
         self._total_length = total.cpu().numpy().astype(np.float32)
+
+    def _eval_losses(self) -> dict[str, np.ndarray] | None:
+        """惰性计算逐分项损失(原始光源采样,一次性缓存)。"""
+        if self._losses is None and self._blocks is not None and self._target is not None:
+            with torch.no_grad():
+                flow = self._seq()
+                total, parts = total_loss(
+                    flow, self._seq, self._target, self._blocks, self._weights
+                )
+            self._losses = {k: v.cpu().numpy().astype(np.float32) for k, v in parts.items()}
+            self._losses["total"] = total.cpu().numpy().astype(np.float32)
+        return self._losses
 
     def layout(self, n_rays: int) -> LayoutData:
         if n_rays not in self._layout:
@@ -268,7 +297,7 @@ class TraceCache:
     def layout_packet(self, pop: int, n_rays: int) -> bytes:
         data = self.layout(n_rays)
         _check_pop(pop, data.population)
-        meta = {
+        meta: dict[str, Any] = {
             "labels": data.labels,
             "kinds": data.kinds,
             "regions": [r[pop] for r in data.regions],
@@ -277,6 +306,9 @@ class TraceCache:
             "fields_deg": data.fields_deg.tolist(),
             "wavelengths_nm": data.wavelengths_nm.tolist(),
         }
+        losses = self._eval_losses()
+        if losses is not None:
+            meta["losses"] = {k: float(v[pop]) for k, v in losses.items()}
         return pack(meta, {
             "profiles": data.profiles[pop],
             "rims": data.rims[pop],

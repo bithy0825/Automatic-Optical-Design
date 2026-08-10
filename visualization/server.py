@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import webbrowser
+from collections.abc import Mapping, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from component import Refractor, Sensor, Sequential
+from optimization.loss import LossWeights
 from optimization.target import Target
 from visualization.trace import PopOutOfRange, TraceCache, probe_illumination
 
@@ -70,11 +73,13 @@ def create_server(
     seq: Sequential,
     *,
     target: Target | None = None,
+    blocks: Sequence[Mapping[str, Any]] | None = None,
+    weights: LossWeights | None = None,
     port: int = 8000,
     web_root: Path = _WEB_ROOT,
 ) -> ThreadingHTTPServer:
     """构建服务实例(不启动);port=0 时由系统分配端口(测试用)。"""
-    cache = TraceCache(seq)
+    cache = TraceCache(seq, target=target, blocks=blocks, weights=weights)
     meta = system_meta(seq, target)
     P = int(meta["population"])
 
@@ -154,11 +159,15 @@ def serve(
     seq: Sequential,
     *,
     target: Target | None = None,
+    blocks: Sequence[Mapping[str, Any]] | None = None,
+    weights: LossWeights | None = None,
     port: int = 8000,
     open_browser: bool = False,
 ) -> None:
     """启动可视化服务(阻塞,Ctrl+C 退出)。"""
-    server = create_server(seq, target=target, port=port)
+    server = create_server(
+        seq, target=target, blocks=blocks, weights=weights, port=port
+    )
     url = f"http://127.0.0.1:{server.server_address[1]}"
     if not (_WEB_ROOT / "dist").is_dir():
         print("[visualization] web/dist 不存在,请先在 visualization/web 下执行 bun run build")

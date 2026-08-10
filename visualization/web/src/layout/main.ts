@@ -58,9 +58,21 @@ export async function boot(): Promise<void> {
       { key: "scale", x: 56, y: viewHost.clientHeight - 18, text: `Δ ${viewport.gridStep} mm`, cls: "lbl" },
     ];
     if (packet) {
+      const cx = viewHost.clientWidth / 2;
+      if (packet.meta.losses) {
+        const L = packet.meta.losses;
+        const f = (v: number) => (Math.abs(v) >= 0.01 ? v.toFixed(4) : v.toExponential(1));
+        items.push({
+          key: "losses",
+          x: cx,
+          y: viewHost.clientHeight - 36,
+          text: `effl ${f(L.effl)} · blur ${f(L.blur)} · distortion ${f(L.distortion)} · toll ${f(L.toll)} · bounds ${f(L.bounds)} · total ${f(L.total)}`,
+          cls: "lbl",
+        });
+      }
       items.push({
         key: "spec",
-        x: viewHost.clientWidth / 2,
+        x: cx,
         y: viewHost.clientHeight - 18,
         text: `总长 ${packet.meta.total_length.toFixed(2)} mm · EFFL ${packet.meta.effl.toFixed(2)} mm`,
         cls: "lbl",
