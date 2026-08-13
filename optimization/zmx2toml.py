@@ -525,8 +525,8 @@ def convert(path: Path) -> str:
             raise Skip(f"mirror surface (surf {s.index})")
         if s.disz is None:
             raise Skip(f"infinite thickness (surf {s.index})")
-        if s.disz < 0:
-            raise Skip(f"negative thickness (surf {s.index})")
+        # if s.disz < 0:
+        #     raise Skip(f"negative thickness (surf {s.index})")
         if s.diam <= 0:  # 自动口径:以 2×EPD 兜底全直径,且不越半球域
             if zmx.enpd is None or zmx.enpd <= 0:
                 raise Skip(f"zero diameter (surf {s.index})")
@@ -553,7 +553,9 @@ def convert(path: Path) -> str:
             parts.append(_stop(s, front=i == 0, std_scale=std_scale))
         else:
             parts.append(_refractor(s, allow_negative=i == 0, std_scale=std_scale))
-        parts.append(_gap(s, last=i == len(optical) - 1, effl=effl, std_scale=std_scale))
+        parts.append(
+            _gap(s, last=i == len(optical) - 1, effl=effl, std_scale=std_scale)
+        )
     parts.append(_sensor(effl, theta))
     return "\n\n".join(parts) + "\n"
 
