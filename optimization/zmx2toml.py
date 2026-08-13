@@ -229,8 +229,8 @@ def infer_fnumber(zmx: Zmx, optical: list[Surface], effl: float) -> float:
 
 
 def _auto_fov(effl: float) -> float:
-    """视场缺失/失效时自动推断:全画幅半对角线 21.6mm 按焦距缩放,钳 [3°, 45°]。"""
-    return min(45.0, max(3.0, math.degrees(math.atan(21.6 / effl))))
+    """视场缺失/失效时自动推断:半对角线 9.5mm 按焦距缩放,钳 [3°, 45°]。"""
+    return min(45.0, max(3.0, math.degrees(math.atan(9.5 / effl))))
 
 
 def infer_fov(zmx: Zmx, effl: float) -> float:
@@ -284,9 +284,24 @@ def _alpha_bounds(s: Surface, D: int, jmax: int) -> str:
     return f"[{_f(-b)}, {_f(b)}]"
 
 
-def _init_std(mean: float, floor: float) -> float:
-    """初始化 std:3σ ≈ ±100%(= |mean|/3);mean≈0 时取绝对下限 floor。"""
-    return max(abs(mean) / 3.0, floor)
+def _fov_std_scale(theta: float) -> float:
+    """广角设计初始化 std 倍率:角度越大越收紧(越接近原始 ZMX 结构)。
+
+    倍率 3→2→1 对应 <25°/25°–35°/35°–45°，scale = 倍率/3。
+    """
+    if theta >= 35.0:
+        return 1.0 / 3.0
+    if theta >= 25.0:
+        return 2.0 / 3.0
+    return 1.0
+
+
+def _init_std(mean: float, floor: float, scale: float = 1.0) -> float:
+    """初始化 std:3σ ≈ ±100%(= |mean|/3);mean≈0 时取绝对下限 floor。
+
+    scale > 1 加宽分布(广角设计探索增强)。
+    """
+    return max(abs(mean) / 3.0 * scale, floor)
 
 
 def _domain_cmax(s: Surface, D: int) -> float | None:
@@ -362,17 +377,17 @@ def _shape_of(s: Surface) -> tuple[str, int]:
     return ("conic", 0) if s.coni != 0.0 else ("sphere", 0)
 
 
-def _refractor(s: Surface, *, allow_negative: bool) -> str:
+def _refractor(s: Surface, *, allow_negative: bool, std_scale: float = 1.0) -> str:
     D = _diameter_of(s)
     shape, jmax = _shape_of(s)
     c = round(s.curv, 3)
 
-    d_std = _init_std(D, 0.1)
-    c_std = _init_std(c, 0.01)
+    d_std = _init_std(D, 0.1, std_scale)
+    c_std = _init_std(c, 0.01, std_scale)
     cmax = _domain_cmax(s, D)
     if cmax is not None:
         c_std = min(c_std, max(0.005, (0.9 * cmax - abs(c)) / 3.0))
-    k_std = _init_std(s.coni, 0.05) if shape != "sphere" else 0.0
+    k_std = _init_std(s.coni, 0.05, std_scale) if shape != "sphere" else 0.0
 
     lines = ["[[component]]", 'type = "refractor"', f'shape = "{shape}"']
     if allow_negative:
@@ -392,7 +407,7 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
         rho = D / 2
         for j in range(2, jmax + 1):
             a = s.parms.get(j, 0.0) * rho ** (2 * j)
-            a_std = _init_std(a, 0.001)
+            a_std = _init_std(a, 0.001, std_scale)
             a_std_worst = max(a_std_worst, a_std)
             lines.append(
                 f'alpha{2 * j} = {{ method = "normal", mean = {_f(a)}, std = {_f(a_std)} }}'
@@ -421,9 +436,9 @@ def _refractor(s: Surface, *, allow_negative: bool) -> str:
     return "\n".join(lines)
 
 
-def _stop(s: Surface, *, front: bool = False) -> str:
+def _stop(s: Surface, *, front: bool = False, std_scale: float = 1.0) -> str:
     D = _diameter_of(s)
-    std = _init_std(D, 0.1)
+    std = _init_std(D, 0.1, std_scale)
     lines = ["[[component]]", 'type = "stop"']
     if front:  # 前置光阑与光源同面,t≈0 的数值噪声需允许负距离解
         lines.append("solver = { allow_negative = true }")
@@ -436,7 +451,7 @@ def _stop(s: Surface, *, front: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _gap(s: Surface, *, last: bool, effl: float) -> str:
+def _gap(s: Surface, *, last: bool, effl: float, std_scale: float = 1.0) -> str:
     # 制造下限 0.1mm:过薄间隙的初始值与下界同时抬升——否则优化器会把
     # 薄间隙推向无意义的亚 0.1mm 结构(处方里这种值多为接触/胶合记法)
     t = max(round(s.disz or 0.0, 3), 0.1)
@@ -449,7 +464,7 @@ def _gap(s: Surface, *, last: bool, effl: float) -> str:
     lo = 0.5 if t >= 0.5 else 0.1
     if t > hi:
         hi = round(1.5 * t, 3)  # 超厚层按 50% 抖动顶出上限
-    std = _init_std(t, 0.1)
+    std = _init_std(t, 0.1, std_scale)
     return "\n".join(
         [
             "[[component]]",
@@ -510,6 +525,8 @@ def convert(path: Path) -> str:
             raise Skip(f"mirror surface (surf {s.index})")
         if s.disz is None:
             raise Skip(f"infinite thickness (surf {s.index})")
+        if s.disz < 0:
+            raise Skip(f"negative thickness (surf {s.index})")
         if s.diam <= 0:  # 自动口径:以 2×EPD 兜底全直径,且不越半球域
             if zmx.enpd is None or zmx.enpd <= 0:
                 raise Skip(f"zero diameter (surf {s.index})")
@@ -524,16 +541,19 @@ def convert(path: Path) -> str:
     effl = _snap_effl(infer_effl(zmx, optical))
     fnum = infer_fnumber(zmx, optical, effl)
     theta = infer_fov(zmx, effl)
+    if theta > 45:
+        raise Skip(f"extreme FOV ({theta:.1f}°)")
 
+    std_scale = _fov_std_scale(theta)
     parts = [_header(path.stem, effl, fnum, theta)]
     # allow_negative 只给链上第一个面(与光源同面,t≈0 的数值噪声/首面负曲率
     # 的合法负根);中间面负距离=X 型打架,必须保持判死
     for i, s in enumerate(optical):
         if s.is_stop and s.curv == 0.0:
-            parts.append(_stop(s, front=i == 0))
+            parts.append(_stop(s, front=i == 0, std_scale=std_scale))
         else:
-            parts.append(_refractor(s, allow_negative=i == 0))
-        parts.append(_gap(s, last=i == len(optical) - 1, effl=effl))
+            parts.append(_refractor(s, allow_negative=i == 0, std_scale=std_scale))
+        parts.append(_gap(s, last=i == len(optical) - 1, effl=effl, std_scale=std_scale))
     parts.append(_sensor(effl, theta))
     return "\n\n".join(parts) + "\n"
 
