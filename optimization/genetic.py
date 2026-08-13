@@ -62,13 +62,24 @@ class GeneticAlgorithm:
         weights: LossWeights | None = None,
         *,
         callbacks: Sequence[Callback] | None = None,
+        dtype_switch: float | None = None,
     ) -> None:
         opts = self.options
         topk = opts.topk if opts.topk is not None else max(opts.population // 2, 1)
         total_gen = opts.generation
+        switch_gen = int(total_gen * dtype_switch) if dtype_switch else None
 
         for gen in range(total_gen):
-            scale = _damping(opts.damping, gen, total_gen, opts.mutate_std_start, opts.mutate_std_end)
+            if switch_gen is not None and gen == switch_gen < total_gen:
+                torch.set_default_dtype(torch.float64)
+                seq.to(dtype=torch.float64)
+                for stage in self.stages:
+                    if isinstance(stage, GradientOptimizer):
+                        stage._opt = None
+                print(f"[dtype] gen {gen}/{total_gen}: float32 → float64")
+            scale = _damping(
+                opts.damping, gen, total_gen, opts.mutate_std_start, opts.mutate_std_end
+            )
             mutate_blocks = [
                 {
                     **block,

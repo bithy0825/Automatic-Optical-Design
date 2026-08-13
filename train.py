@@ -79,6 +79,7 @@ class RunConfig:
     save_every: int | None
     history: Path | None
     progress: bool
+    dtype_switch: float | None
 
 
 def resolve_run(
@@ -113,6 +114,10 @@ def resolve_run(
     if save_every is not None and save_every < 1:
         raise ValueError(f"save_every must be >= 1, got {save_every}")
 
+    dtype_switch = args.dtype_switch
+    if dtype_switch is not None and not 0 <= dtype_switch <= 1:
+        raise ValueError(f"dtype_switch must be in [0, 1], got {dtype_switch}")
+
     return RunConfig(
         seed=None if seed is None else int(seed),
         device=device,
@@ -121,6 +126,7 @@ def resolve_run(
         save_every=save_every,
         history=path(args.history, term.HISTORY),
         progress=args.progress,
+        dtype_switch=dtype_switch,
     )
 
 
@@ -161,6 +167,13 @@ def parse_args() -> argparse.Namespace:
         "--no-progress", dest="progress", action="store_false", help="关闭进度条"
     )
     p.add_argument(
+        "--dtype-switch",
+        type=float,
+        default=0.7,
+        metavar="RATIO",
+        help="前 RATIO 代用 float32，其余 float64（0~1，缺省 0.7；设 0 则全程 float64）",
+    )
+    p.add_argument(
         "--set",
         dest="overrides",
         action="append",
@@ -172,13 +185,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    torch.set_default_dtype(torch.float64)  # 全程双精度（含追迹与优化）
     args = parse_args()
     config_path = Path(args.config).resolve()
     cfg = load_config(str(config_path))
     for expr in args.overrides:
         apply_override(cfg, expr)
     run = resolve_run(cfg, args, config_path)
+
+    if run.dtype_switch and run.dtype_switch > 0:
+        torch.set_default_dtype(torch.float32)
+    else:
+        torch.set_default_dtype(torch.float64)
 
     if run.seed is not None:
         torch.manual_seed(run.seed)
@@ -213,7 +230,10 @@ def main() -> None:
         callbacks.append(
             ProgressBar(
                 o.generation,
-                {term.TYPE.resolve(b): s.options.step for b, s in zip(optimizer_blocks, stages)},
+                {
+                    term.TYPE.resolve(b): s.options.step
+                    for b, s in zip(optimizer_blocks, stages)
+                },
             )
         )
     if run.save_every is not None:
@@ -221,7 +241,14 @@ def main() -> None:
 
     t0 = time.perf_counter()
     try:
-        ga.run(seq, target, blocks, weights, callbacks=callbacks)
+        ga.run(
+            seq,
+            target,
+            blocks,
+            weights,
+            callbacks=callbacks,
+            dtype_switch=run.dtype_switch,
+        )
     finally:
         for cb in callbacks:
             if isinstance(cb, ProgressBar):
@@ -234,7 +261,9 @@ def main() -> None:
 
     if run.history is not None:
         run.history.parent.mkdir(parents=True, exist_ok=True)
-        run.history.write_text(json.dumps(history.records, ensure_ascii=False, indent=2))
+        run.history.write_text(
+            json.dumps(history.records, ensure_ascii=False, indent=2)
+        )
         print(f"历史:      {run.history}")
 
 
