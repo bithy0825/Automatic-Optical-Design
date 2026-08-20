@@ -1,19 +1,21 @@
-"""可视化追迹管线:按视图采样参数对全种群批量追迹,结果缓存后按 pop 切片。
+"""可视化追迹管线:按视图采样参数批量追迹并缓存。
 
-两种视图:
-* 布局 —— 扇形光瞳 (n_rays, 1),记录逐面交点路径、面 profile、材料链。
-* 点列 —— disk 光瞳 (density, 2*density),记录传感器局部坐标(第 0 点为主光线)。
+两种视图(layout/spot)对全种群一次追迹,打包时按 pop 切片;PSF 的
+Kirchhoff 积分计算量随 P 线性膨胀(E_010 P=256 时中间张量达数 GB),
+改为请求级先切单个体再追迹。
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import Any, Final
 
 import numpy as np
 import torch
 
+from analysis.psf import psf_kirchhoff
 from component import Gap, InfiniteSource, Refractor, Sensor, Sequential, Stop
 from component.protocol import Component
 from core import TraceFlow, Transformer
@@ -65,6 +67,23 @@ class SpotData:
     @property
     def population(self) -> int:
         return int(self.spots.shape[0])
+
+
+@dataclass(slots=True)
+class PsfData:
+    """单个体 PSF 数据(缓存单元,已 numpy 化;P 恒为 1,见 _slice_pop)。"""
+
+    psf: np.ndarray            # (P, F, W, H, H) f32,每张 Σ=1
+    centers: np.ndarray        # (P, F, W, 2) f32,传感器局部 xy mm
+    na: np.ndarray             # (P, F, W) f32
+    delta: float               # mm/px
+    fields_deg: np.ndarray     # (F, 2) f32
+    wavelengths_nm: np.ndarray # (W,) f32
+    warnings: list[str]
+
+    @property
+    def population(self) -> int:
+        return int(self.psf.shape[0])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -155,8 +174,14 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
                 regions.append([""] * P)
         return flow
 
-    with torch.no_grad():
-        flow = viz.forward(callback=_cb)
+    # 光源的初始位姿按进程缺省 dtype 创建,追迹期间临时切到链 dtype(退出还原)
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(viz.dtype)
+    try:
+        with torch.no_grad():
+            flow = viz.forward(callback=_cb)
+    finally:
+        torch.set_default_dtype(prev_dtype)
 
     paths = torch.stack(step_pts, dim=-2).cpu().numpy().astype(np.float32)
     holds = torch.stack(step_hold, dim=-1).cpu().numpy().astype(np.uint8)
@@ -218,8 +243,14 @@ def trace_spot(seq: Sequential, density: int, sampling: str = "uniform") -> Spot
             captured["spots"] = local[..., :2].detach()
         return flow
 
-    with torch.no_grad():
-        flow = viz.forward(callback=_cb)
+    # 光源的初始位姿按进程缺省 dtype 创建,追迹期间临时切到链 dtype(退出还原)
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(viz.dtype)
+    try:
+        with torch.no_grad():
+            flow = viz.forward(callback=_cb)
+    finally:
+        torch.set_default_dtype(prev_dtype)
     if "spots" not in captured:
         raise RuntimeError("trace_spot: 系统中没有 Sensor 元件")
 
@@ -228,6 +259,45 @@ def trace_spot(seq: Sequential, density: int, sampling: str = "uniform") -> Spot
     fields_deg = torch.rad2deg(flow.rays.field[0, :, 0, 0, :]).cpu().numpy().astype(np.float32)
     wls = flow.rays.wavelength[0, 0, :, 0].cpu().numpy().astype(np.float32)
     return SpotData(spots=spots, holds=holds, fields_deg=fields_deg, wavelengths_nm=wls)
+
+
+def trace_psf(
+    seq: Sequential,
+    density: int,
+    size: int,
+    delta: float | None = None,
+    sampling: str = "fibonacci",
+) -> PsfData:
+    """全种群 PSF:disk 光瞳(点数口径与 trace_spot 一致),Kirchhoff 积分。
+
+    Args:
+        density: 密度档位。uniform → disk (density, 2·density);
+            fibonacci → 等点数 disk(N = 2·d² − 2·d + 1)。
+        size:    PSF 网格边长 H(H×H)。
+        delta:   像面采样间隔 mm/px;None → 自动 λ_min/(4·NA)。
+        sampling: ``"uniform"`` 或 ``"fibonacci"``。
+    """
+    if density < 4:
+        raise ValueError(f"density must be >= 4, got {density}")
+    if sampling == "uniform":
+        pupil = SampleOptions(method="uniform", region="disk", count=(density, 2 * density))
+    elif sampling == "fibonacci":
+        pupil = SampleOptions(
+            method="fibonacci", region="disk", count=2 * density * density - 2 * density + 1
+        )
+    else:
+        raise ValueError(f"unknown sampling {sampling!r}")
+    res = psf_kirchhoff(seq, size, delta, pupil=pupil)
+    fields_deg, wls = probe_illumination(seq)
+    return PsfData(
+        psf=res.psf.cpu().numpy().astype(np.float32),
+        centers=res.centers.cpu().numpy().astype(np.float32),
+        na=res.na.cpu().numpy().astype(np.float32),
+        delta=res.delta,
+        fields_deg=fields_deg,
+        wavelengths_nm=wls,
+        warnings=res.warnings,
+    )
 
 
 class PopOutOfRange(IndexError):
@@ -239,8 +309,26 @@ def _check_pop(pop: int, population: int) -> None:
         raise PopOutOfRange(f"pop {pop} out of range [0, {population})")
 
 
+def _slice_pop(seq: Sequential, pop: int) -> Sequential:
+    """切出第 *pop* 个个体(种群维 P→1),与原体断开。
+
+    克隆后逐参数/buffer 把批量维切为单行;材料经索引引用单例库,切片
+    不碰索引值,与 ``where_`` 同一约定。逐 pop 计算 PSF 的前置步骤。
+    """
+    one = seq.clone()
+    P = seq.population
+    with torch.no_grad():
+        for t in chain(one.parameters(), one.buffers()):
+            if t.shape[0] == P:
+                t.data = t.data[pop : pop + 1].contiguous()
+    return one
+
+
 class TraceCache:
-    """按视图参数缓存全种群追迹;打包时按 pop 切片。
+    """按视图参数缓存追迹结果。
+
+    layout/spot 全种群一次追迹、打包时按 pop 切片;PSF 改为请求级
+    单个体追迹(见模块 docstring),按 (pop, 视图参数) 缓存。
 
     *target*/*blocks*/*weights* 给出时,另缓存一次原始采样口径的
     ``total_loss`` 逐分项结果(与训练口径一致),供 layout_packet 携带。
@@ -260,6 +348,7 @@ class TraceCache:
         self._losses: dict[str, np.ndarray] | None = None
         self._layout: dict[int, LayoutData] = {}
         self._spot: dict[tuple[int, str], SpotData] = {}
+        self._psf: dict[tuple, PsfData] = {}
         # 系统总长:首个折射面顶点 → 传感器,即其后的全部 gap 厚度之和(逐 pop)
         P = seq.population
         total = torch.zeros(P, device=seq.device, dtype=seq.dtype)
@@ -274,11 +363,17 @@ class TraceCache:
     def _eval_losses(self) -> dict[str, np.ndarray] | None:
         """惰性计算逐分项损失(原始光源采样,一次性缓存)。"""
         if self._losses is None and self._blocks is not None and self._target is not None:
-            with torch.no_grad():
-                flow = self._seq()
-                total, parts = total_loss(
-                    flow, self._seq, self._target, self._blocks, self._weights
-                )
+            # 同 trace_layout:追迹期间把进程缺省 dtype 钉到链 dtype
+            prev_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(self._seq.dtype)
+            try:
+                with torch.no_grad():
+                    flow = self._seq()
+                    total, parts = total_loss(
+                        flow, self._seq, self._target, self._blocks, self._weights
+                    )
+            finally:
+                torch.set_default_dtype(prev_dtype)
             self._losses = {k: v.cpu().numpy().astype(np.float32) for k, v in parts.items()}
             self._losses["total"] = total.cpu().numpy().astype(np.float32)
         return self._losses
@@ -325,3 +420,30 @@ class TraceCache:
             "wavelengths_nm": data.wavelengths_nm.tolist(),
         }
         return pack(meta, {"spots": data.spots[pop], "holds": data.holds[pop]})
+
+    def psf(
+        self, pop: int, density: int, sampling: str, size: int, delta: float | None
+    ) -> PsfData:
+        _check_pop(pop, self._seq.population)
+        key = (pop, density, sampling, size, delta)
+        if key not in self._psf:
+            self._psf[key] = trace_psf(
+                _slice_pop(self._seq, pop), density, size, delta, sampling
+            )
+        return self._psf[key]
+
+    def psf_packet(
+        self, pop: int, density: int, sampling: str, size: int, delta: float | None
+    ) -> bytes:
+        data = self.psf(pop, density, sampling, size, delta)
+        meta = {
+            "delta": data.delta,
+            "fields_deg": data.fields_deg.tolist(),
+            "wavelengths_nm": data.wavelengths_nm.tolist(),
+            "warnings": data.warnings,
+        }
+        return pack(meta, {
+            "psf": data.psf[0],
+            "centers": data.centers[0],
+            "na": data.na[0],
+        })

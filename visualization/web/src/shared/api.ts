@@ -92,3 +92,11 @@ export interface SpotMeta {
   fields_deg: [number, number][];
   wavelengths_nm: number[];
 }
+
+/** /api/psf 包 meta */
+export interface PsfMeta {
+  delta: number; // mm/px(实际使用值;请求 0 = 服务器自动)
+  fields_deg: [number, number][];
+  wavelengths_nm: number[];
+  warnings: string[];
+}

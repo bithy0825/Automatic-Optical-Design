@@ -70,3 +70,6 @@ canvas.view { position: absolute; inset: 0; width: 100%; height: 100%; display: 
   position: absolute; top: 4px; left: 6px; z-index: 1; /* 压在本格 canvas 之上 */
   color: #8b93a3; font-size: 10px; white-space: pre; line-height: 1.4;
 }
+
+/* PSF 热图:像素化放大 */
+.spot-grid .cell canvas.pix { image-rendering: pixelated; }

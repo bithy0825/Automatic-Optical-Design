@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build src/index.ts src/layout.ts src/spot.ts --outdir dist --target browser",
-    "watch": "bun build src/index.ts src/layout.ts src/spot.ts --outdir dist --target browser --watch",
+    "build": "bun build src/index.ts src/layout.ts src/spot.ts src/psf.ts --outdir dist --target browser",
+    "watch": "bun build src/index.ts src/layout.ts src/spot.ts src/psf.ts --outdir dist --target browser --watch",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

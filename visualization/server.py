@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import torch
+
 from component import Refractor, Sensor, Sequential
 from optimization.loss import LossWeights
 from optimization.target import Target
@@ -69,6 +71,19 @@ def _int_param(qs: dict[str, list[str]], name: str, default: int, *, lo: int, hi
     return value
 
 
+def _float_param(
+    qs: dict[str, list[str]], name: str, default: float, *, lo: float, hi: float
+) -> float:
+    raw = qs.get(name, [str(default)])[0]
+    try:
+        value = float(raw)
+    except ValueError:
+        raise _Error(400, f"{name} must be a number, got {raw!r}") from None
+    if not lo <= value <= hi:
+        raise _Error(400, f"{name} must be in [{lo}, {hi}], got {value}")
+    return value
+
+
 def create_server(
     seq: Sequential,
     *,
@@ -79,6 +94,7 @@ def create_server(
     web_root: Path = _WEB_ROOT,
 ) -> ThreadingHTTPServer:
     """构建服务实例(不启动);port=0 时由系统分配端口(测试用)。"""
+    seq = seq.clone().to(torch.float64)  # PSF 全链 float64;不动调用方的系统
     cache = TraceCache(seq, target=target, blocks=blocks, weights=weights)
     meta = system_meta(seq, target)
     P = int(meta["population"])
@@ -111,6 +127,19 @@ def create_server(
                     if sampling not in ("uniform", "fibonacci"):
                         raise _Error(400, f"sampling must be uniform|fibonacci, got {sampling!r}")
                     self._binary(cache.spot_packet(pop, density, sampling))
+                case "/api/psf":
+                    pop = _int_param(qs, "pop", 0, lo=0, hi=P - 1)
+                    density = _int_param(qs, "density", 64, lo=4, hi=256)
+                    size = _int_param(qs, "size", 64, lo=8, hi=512)
+                    delta = _float_param(qs, "delta", 0.0, lo=0.0, hi=10.0)
+                    sampling = qs.get("sampling", ["fibonacci"])[0]
+                    if sampling not in ("uniform", "fibonacci"):
+                        raise _Error(400, f"sampling must be uniform|fibonacci, got {sampling!r}")
+                    self._binary(cache.psf_packet(
+                        pop, density, sampling, size, None if delta == 0.0 else delta
+                    ))
+                case "/psf":
+                    self._static("psf.html")
                 case "/":
                     self._static("index.html")
                 case "/layout":

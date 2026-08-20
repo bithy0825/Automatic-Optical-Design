@@ -140,6 +140,19 @@ export function makeToggle(text: string, initial: boolean, cb: (on: boolean) => 
   return wrap;
 }
 
+/** 数字输入控件(扩展控件用)。 */
+export function makeNumber(text: string, initial: string, cb: (v: string) => void): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className = "ctl-select";
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = "any";
+  input.value = initial;
+  input.addEventListener("change", () => cb(input.value));
+  wrap.append(labelEl(text), input);
+  return wrap;
+}
+
 /** URL hash 状态(#pop=3&fields=0,2&wvls=1)。 */
 export function readHash(): URLSearchParams {
   return new URLSearchParams(location.hash.slice(1));
