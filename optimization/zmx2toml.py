@@ -5,10 +5,13 @@
 
 成功:不给 out.toml 则打印到 stdout;给出则将 TOML 写入该路径(父目录不存在
 自动创建)并打印保存路径。被过滤:打印 ``SKIP <文件名>: <原因>``,退出码 1,
-不落盘、不建目录。设计见 docs/superpowers/specs/2026-08-06-zmx2toml-design.md。
+不落盘、不建目录。
 
 仅支持:STANDARD(球面/圆锥面)、EVENASPH(偶次非球面)、平面 STOP、像面;
-EFFL / F 数 / 视场角按推断链解析,材料一律 sellmeier 随机(只借 zmx 的结构)。
+EFFL / F 数 / 视场角按推断链解析。材料只允许玻璃与空气:玻璃一律 sellmeier
+随机(只借 zmx 的结构),含浸液等非玻璃介质(水/油)的处方直接过滤。
+两侧同为空气的哑面不参与折射,转换前删除并折并厚度;
+平面光阑若携带玻璃则退化为折射面,以免丢失其后介质。
 """
 
 from __future__ import annotations
@@ -156,6 +159,13 @@ def parse_zmx(path: Path) -> Zmx:
 
 _DB = None  # sellmeier 单例(懒加载,仅用于 EFFL 计算,不做材料初始化)
 
+# 非玻璃介质(浸液等):本框架材料只支持玻璃与空气,含之即过滤。
+_NON_GLASS = {"WATER"}
+
+# Zemax 模型玻璃占位 (nd, vd):处方转换器(如 Cambridge/Imaging Optics 系列)
+# 给目录玻璃填的默认值;命中时库值优先于内联值。
+_PLACEHOLDER_NV = (1.5, 40.0)
+
 
 def _db_nd(name: str) -> float | None:
     """库中同名(或 N- 前缀)玻璃的 d 线折射率。"""
@@ -170,16 +180,33 @@ def _db_nd(name: str) -> float | None:
     return None
 
 
+def _medium_nd(s: Surface, *, db_first: bool) -> float | None:
+    """表面后介质的 d 线折射率;空气 1.0,未知返回 None。
+
+    内联 nd 是专利处方的真实数据,优先;*db_first* 时占位 (1.5, 40) 的
+    模型玻璃以库值为准(转换器填的默认值不如目录可信)。
+    """
+    if s.glass is None:
+        return 1.0
+    inline = s.nd if s.nd > 1.0 else None
+    if db_first and (s.nd, s.vd) == _PLACEHOLDER_NV:
+        return _db_nd(s.glass) or inline
+    return inline or _db_nd(s.glass)
+
+
 def _ynu_effl(optical: list[Surface]) -> float | None:
-    """一阶 ynu 近轴追迹 EFFL;任一面折射率不明或系统不会聚则返回 None。"""
+    """一阶 ynu 近轴追迹 EFFL;任一面折射率不明或系统不会聚则返回 None。
+
+    占位符玻璃全或无地换用库值:只换可解析的子集会造成折射率体系不一致
+    (部分 1.5 部分真值),追迹反而失真——任一占位玻璃不可解析则全部用内联值。
+    """
+    ph = [s for s in optical if s.glass and (s.nd, s.vd) == _PLACEHOLDER_NV]
+    db_first = bool(ph) and all(_db_nd(s.glass) is not None for s in ph)
     y, n_u, n_prev = 1.0, 0.0, 1.0
     for i, s in enumerate(optical):
-        if s.glass is None:
-            n_next = 1.0
-        else:
-            n_next = s.nd if s.nd > 1.0 else _db_nd(s.glass)
-            if n_next is None:
-                return None
+        n_next = _medium_nd(s, db_first=db_first)
+        if n_next is None:
+            return None
         n_u -= y * (n_next - n_prev) * s.curv
         if i + 1 < len(optical):
             y += (s.disz or 0.0) * n_u / n_next
@@ -311,7 +338,7 @@ def _domain_cmax(s: Surface, D: int) -> float | None:
     return 1.0 / (math.sqrt(1.0 + s.coni) * (D / 2))
 
 
-def _header(stem: str, effl: float, fnum: float, theta: float) -> str:
+def _header(stem: str, effl: float, fnum: float, theta: float, lead: float = 0.0) -> str:
     return f'''[target]
 fov = [[0, {_f(round(theta, 3))}], [0, 0]]
 F = {_f(round(fnum, 3))}
@@ -351,7 +378,7 @@ wavel = {{ method = "uniform", region = "line", count = 3 }}
 
 [[component]]
 type = "gap"
-thickness = {{ method = "raw", value = 0.0 }}'''
+thickness = {{ method = "raw", value = {_f(round(max(lead, 0.0), 3))} }}'''
 
 
 def _diameter_of(s: Surface) -> int:
@@ -497,6 +524,40 @@ def _sensor(effl: float, theta: float) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _drop_noop_surfaces(optical: list[Surface]) -> tuple[list[Surface], float]:
+    """删除空-空哑面并折并厚度;返回 (保留面, 折入光源间隙的厚度)。
+
+    前后介质同为空气的面(无论平/曲)不参与折射,只是占位/标记:删除之,
+    其 DISZ 累进前一保留面的 DISZ(首段无处可折,累进光源间隙)。
+    口径守卫:哑面口径小于任一相邻保留面时保留,以免删面改变口径裁切。
+    光阑面永不删除。
+    """
+    kept: list[Surface] = []
+    lead = 0.0
+    i = 0
+    while i < len(optical):
+        s = optical[i]
+        if s.is_stop or s.glass is not None or (kept and kept[-1].glass is not None):
+            kept.append(s)
+            i += 1
+            continue
+        j = i  # 连续哑面段 [i, j)(段内互为空气,天然满足同介质前提)
+        while j < len(optical) and not optical[j].is_stop and optical[j].glass is None:
+            j += 1
+        neighbors = [x for x in (kept[-1] if kept else None, optical[j] if j < len(optical) else None) if x is not None]
+        limit = max((x.diam for x in neighbors), default=0.0)
+        if all(s.diam >= limit for s in optical[i:j]):
+            fold = sum(s.disz or 0.0 for s in optical[i:j])
+            if kept:
+                kept[-1].disz = (kept[-1].disz or 0.0) + fold
+            else:
+                lead += fold
+        else:
+            kept.extend(optical[i:j])
+        i = j
+    return kept, lead
+
+
 def convert(path: Path) -> str:
     zmx = parse_zmx(path)
     scale = _UNIT_SCALE.get(zmx.unit)
@@ -523,6 +584,8 @@ def convert(path: Path) -> str:
             raise Skip(f"unsupported surface type: {s.type} (surf {s.index})")
         if s.glass and s.glass.upper() == "MIRROR":
             raise Skip(f"mirror surface (surf {s.index})")
+        if s.glass and s.glass.upper() in _NON_GLASS:
+            raise Skip(f"non-glass medium: {s.glass} (surf {s.index})")
         if s.disz is None:
             raise Skip(f"infinite thickness (surf {s.index})")
         # if s.disz < 0:
@@ -535,8 +598,13 @@ def convert(path: Path) -> str:
                 cap = math.floor(1.8 / abs(s.curv))
                 if math.ceil(2.0 * s.diam) > cap:
                     s.diam = max(cap, 1) / 2.0
-        if s.parms.get(1, 0.0) != 0.0:
-            s.parms = {}  # r² 项无处安放:全部偶次项置 0,退化为 conic/sphere
+        a1 = s.parms.pop(1, 0.0)
+        if a1 != 0.0:  # r² 项折入曲率(近轴 z ≈ (c + 2·a1)·r²/2),保留更高次项
+            s.curv += 2.0 * a1
+
+    optical, lead = _drop_noop_surfaces(optical)
+    if not optical:
+        raise Skip("no optical surfaces")
 
     effl = _snap_effl(infer_effl(zmx, optical))
     fnum = infer_fnumber(zmx, optical, effl)
@@ -545,11 +613,11 @@ def convert(path: Path) -> str:
         raise Skip(f"extreme FOV ({theta:.1f}°)")
 
     std_scale = _fov_std_scale(theta)
-    parts = [_header(path.stem, effl, fnum, theta)]
+    parts = [_header(path.stem, effl, fnum, theta, lead)]
     # allow_negative 只给链上第一个面(与光源同面,t≈0 的数值噪声/首面负曲率
     # 的合法负根);中间面负距离=X 型打架,必须保持判死
     for i, s in enumerate(optical):
-        if s.is_stop and s.curv == 0.0:
+        if s.is_stop and s.curv == 0.0 and s.glass is None:
             parts.append(_stop(s, front=i == 0, std_scale=std_scale))
         else:
             parts.append(_refractor(s, allow_negative=i == 0, std_scale=std_scale))
