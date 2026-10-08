@@ -1,10 +1,12 @@
-"""可视化模块：单页前端 + 本地追迹服务（零前端构建，原生 SVG）。
+"""可视化模块：bun + three.js 前端 + 本地追迹服务（光路图 / 点列图）。
 
 用法::
 
     python -m visualization [--port 8000] [--open]
 
-随后在页面里打开 .toml / .pth 文件，切换光路图 / 点列图。
+随后在页面里打开 .toml / .pth 文件，进入光路图或点列图视图。
+前端源码在 ``visualization/web``（bun 管理，依赖 three.js）；改动后需在
+该目录执行 ``bun run build`` 生成 ``web/dist``。
 
 编程入口::
 
@@ -13,7 +15,8 @@
 
 模块组织
 --------
-* :mod:`visualization.trace` —— 2D 视图追迹（光路图 / 点列图数据提取）。
+* :mod:`visualization.trace` —— 追迹管线与缓存（光路图 / 点列图数据）。
+* :mod:`visualization.protocol` —— 二进制帧协议（Python 打包 ↔ TS 解码）。
 * :mod:`visualization.server` —— 本地 HTTP 服务（仅标准库）。
 """
 

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>AOD 可视化</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="launcher">
+    <h1>Automatic Optical Design · 可视化</h1>
+    <div class="open-row">
+      <label class="open-btn">打开 .toml / .pth
+        <input id="file" type="file" accept=".toml,.pth" hidden />
+      </label>
+      <span class="summary" id="status"></span>
+    </div>
+    <div class="summary" id="summary">未加载系统——请先打开一个 .toml 或 .pth 文件。</div>
+    <div class="cards">
+      <a class="card" href="/layout" target="_blank" rel="noopener">
+        <h2>Layout · 二维光路图</h2>
+        <p>xz 截面实体透镜渲染,逐面光路,按视场/波长着色。</p>
+      </a>
+      <a class="card" href="/spot" target="_blank" rel="noopener">
+        <h2>Spot Diagram · 点列图</h2>
+        <p>F×λ 网格,RMS/GEO 半径,Airy 斑,主光线/质心参考。</p>
+      </a>
+    </div>
+  </div>
+  <script type="module" src="/dist/index.js"></script>
+</body>
+</html>
