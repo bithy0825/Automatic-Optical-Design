@@ -2,7 +2,14 @@ from typing import Any, Self, override
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 
-from core import OpticalModule, SystemBoolScalar, SystemLongScalar, TraceFlow, fmt_param, term
+from core import (
+    OpticalModule,
+    SystemBoolScalar,
+    SystemLongScalar,
+    TraceFlow,
+    fmt_param,
+    term,
+)
 from component.protocol import Component
 from materials import Material, MaterialRef
 from physics import refract

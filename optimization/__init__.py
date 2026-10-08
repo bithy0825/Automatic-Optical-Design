@@ -19,7 +19,14 @@ from optimization.loss import (
     total_loss,
 )
 from optimization.target import Target
-from optimization.utils import build_sequential, build_stage, load, load_config, build_target, save
+from optimization.utils import (
+    build_sequential,
+    build_stage,
+    load,
+    load_config,
+    build_target,
+    save,
+)
 
 __all__ = [
     # options

@@ -133,7 +133,9 @@ class Material(nn.Module):
                 f"where: mask must be a ({new.population},) bool tensor, "
                 f"got shape={tuple(mask.shape)}, dtype={mask.dtype}"
             )
-        return cls(indices=torch.where(mask, new.Indices, old.Indices), database=new.database)
+        return cls(
+            indices=torch.where(mask, new.Indices, old.Indices), database=new.database
+        )
 
     def forward(self, wavelength: RayFloatScalar) -> RayFloatScalar:
         return self.database(self.Indices, wavelength)

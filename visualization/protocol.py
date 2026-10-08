@@ -39,7 +39,9 @@ def pack(meta: dict[str, Any], sections: dict[str, np.ndarray]) -> bytes:
         try:
             dtype = _NAMES[arr.dtype.type]
         except KeyError:
-            raise TypeError(f"section {name!r}: unsupported dtype {arr.dtype}") from None
+            raise TypeError(
+                f"section {name!r}: unsupported dtype {arr.dtype}"
+            ) from None
         header["sections"][name] = {
             "offset": len(payload),
             "shape": list(arr.shape),

@@ -9,7 +9,9 @@
 .len 要点(实测 ZEBASE-OSLO 两库):NXT 分块;RD 为半径(曲率=1/RD,缺省=平面);
 TH 厚度;AP 半口径;AST 行为光阑;头行 ``LEN NEW "名" <effl> <面数>`` 直取焦距;
 EBR 入射光束半径定 F 数;UNI 1.0 = cm(×10 转 mm);GLA 可为名字或数值折射率;
-材料一律 sellmeier 随机(只借结构)。
+材料一律 sellmeier 随机(只借结构)。空-空面三分法与 zmx2toml 同规:平面判
+光阑(多光阑)、曲面删除折并厚度、首段丢弃;前承玻璃的平面是玻璃出射面,
+保持折射器。
 """
 
 from __future__ import annotations
@@ -31,8 +33,19 @@ _UNIT_SCALE = 10.0  # UNI 1.0 = cm → mm
 
 # 面块内可识别的关键字;其余一律视为不可表达而过滤
 _KNOWN_SURFACE_KEYS = {
-    "AIR", "GLA", "RD", "TH", "AP", "AST", "CC",
-    "WV", "WV2", "WV3", "WW", "END", "PY",
+    "AIR",
+    "GLA",
+    "RD",
+    "TH",
+    "AP",
+    "AST",
+    "CC",
+    "WV",
+    "WV2",
+    "WV3",
+    "WW",
+    "END",
+    "PY",
 }
 
 
@@ -70,17 +83,19 @@ def _parse_block(s: Surface, key: str, tokens: list[str]) -> None:
         pass
 
 
-def parse_len(path: Path) -> tuple[list[Surface], float | None, float | None, float | None, float | None]:
+def parse_len(
+    path: Path,
+) -> tuple[list[Surface], float | None, float | None, float | None, float | None]:
     """返回 (光学面列表, 头行 EFFL[mm], EBR[mm], ANG[度], 像面 AP[mm])。"""
     text = z2t._read_text(path)
-    m = re.search(r'^UNI\s+([\d.eE+-]+)', text, re.M)
+    m = re.search(r"^UNI\s+([\d.eE+-]+)", text, re.M)
     if not m or abs(float(m.group(1)) - 1.0) > 1e-9:
         raise Skip("unknown unit (UNI != 1.0)")
     m = re.search(r'^LEN\s+NEW\s+"[^"]*"\s+([\d.eE+-]+)', text, re.M)
     hdr_effl = float(m.group(1)) * _UNIT_SCALE if m else None
-    m = re.search(r'^EBR\s+([\d.eE+-]+)', text, re.M)
+    m = re.search(r"^EBR\s+([\d.eE+-]+)", text, re.M)
     ebr = float(m.group(1)) * _UNIT_SCALE if m else None
-    m = re.search(r'^ANG\s+([\d.eE+-]+)', text, re.M)
+    m = re.search(r"^ANG\s+([\d.eE+-]+)", text, re.M)
     ang = float(m.group(1)) if m else None
 
     blocks = re.split(r"^NXT\s*$", text, flags=re.M)
@@ -138,7 +153,9 @@ def _infer_fnumber(effl: float, ebr: float | None) -> float:
 
 
 def _infer_fov(effl: float, ang: float | None, image_ap: float | None) -> float:
-    if ang is not None and 0 < ang < 90:
+    if (
+        ang is not None and ang > 0
+    ):  # 垃圾视场 spec 不被 auto 兜底掩盖,交给 convert 的 >45° 过滤
         return ang
     if image_ap is not None:  # 像面 AP = 像圈半径
         return math.degrees(math.atan(image_ap / effl))
@@ -156,6 +173,8 @@ def convert(path: Path) -> str:
     for s in optical:
         if s.glass and s.glass.upper() == "MIRROR":
             raise Skip(f"mirror surface (surf {s.index})")
+        if s.glass and s.glass.upper() in z2t._NON_GLASS:
+            raise Skip(f"non-glass medium: {s.glass} (surf {s.index})")
         if s.disz is None:
             s.disz = 0.0  # .len 中 TH 缺省 = 零厚度(哑面)
         elif s.disz > 1e6:
@@ -169,27 +188,36 @@ def convert(path: Path) -> str:
                 if math.ceil(2.0 * s.diam) > cap:
                     s.diam = max(cap, 1) / 2.0
 
+    # 空-空面三分法(与 zmx2toml 同规):平面留作光阑,曲面删除折并厚度,首段丢弃
+    optical = z2t._drop_noop_surfaces(optical)
+    if not optical:
+        raise Skip("no optical surfaces")
+
     effl = z2t._snap_effl(_infer_effl(optical, hdr_effl))
     fnum = _infer_fnumber(effl, ebr)
     theta = _infer_fov(effl, ang, image_ap)
+    if theta > 45:
+        raise Skip(f"extreme FOV ({theta:.1f}°)")
 
+    std_scale = z2t._fov_std_scale(theta)
     parts = [z2t._header(path.stem, effl, fnum, theta)]
-    at_origin = True  # 仍未离开光源平面(之前只有零厚度哑面)
-    surfaced = False  # 尚未发出任何面;allow_negative 只给光源平面上的第一个面
+    # allow_negative 只给链上第一个面(与光源同面,t≈0 的数值噪声/首面负曲率
+    # 的合法负根);中间面负距离=X 型打架,必须保持判死
     for i, s in enumerate(optical):
-        is_last = i == len(optical) - 1
-        first = at_origin and not surfaced
-        if s.is_stop and s.curv == 0.0:
-            parts.append(z2t._stop(s, front=first))
-            surfaced = True
-        elif s.glass is not None or s.curv != 0.0:
-            parts.append(z2t._refractor(s, allow_negative=first))
-            surfaced = True
-        # 平面空气哑面(无 AST):删面,gap 照出(厚度为 0 时整块跳过)
-        if is_last or (s.disz or 0.0) > 0 or s.glass is not None or s.curv != 0.0 or s.is_stop:
-            parts.append(z2t._gap(s, last=is_last, effl=effl))
-            if (s.disz or 0.0) > 0:
-                at_origin = False
+        prev_air = i == 0 or optical[i - 1].glass is None
+        # 光阑判定(与 zmx2toml 同规):AST 光阑在空气中不论曲率一律转 stop;
+        # 空-空平面判为光阑(多光阑);前承玻璃的平面是玻璃出射面,保持折射器
+        stop_plane = s.glass is None and (
+            (s.is_stop and (z2t._is_flat(s) or prev_air))
+            or (prev_air and z2t._is_flat(s))
+        )
+        if stop_plane:
+            parts.append(z2t._stop(s, front=i == 0, std_scale=std_scale))
+        else:
+            parts.append(z2t._refractor(s, allow_negative=i == 0, std_scale=std_scale))
+        parts.append(
+            z2t._gap(s, last=i == len(optical) - 1, effl=effl, std_scale=std_scale)
+        )
     parts.append(z2t._sensor(effl, theta))
     return "\n\n".join(parts) + "\n"
 

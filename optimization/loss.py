@@ -107,7 +107,9 @@ def _chief(flow: TraceFlow) -> torch.Tensor:
     return sturdy_div(w.unsqueeze(-1).mul(h).sum(dim=(2, 3), keepdim=True), den)
 
 
-def blur_loss(flow: TraceFlow, seq: Sequential, weights: LossWeights) -> SystemFloatScalar:
+def blur_loss(
+    flow: TraceFlow, seq: Sequential, weights: LossWeights
+) -> SystemFloatScalar:
     """模糊损失：相对本视场主光线的均方偏差 (mm²)。
 
     幸存光线按真实 r²（绕本视场主光线）；死亡光线每条按 **sensor 半径平方**

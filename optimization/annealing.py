@@ -74,7 +74,7 @@ class SimulatedAnnealing:
                 # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
                 keys = list(parts)
                 vals = torch.stack([parts[k].detach().mean() for k in keys]).tolist()
-                metrics = dict(zip(keys, vals))
+                metrics = dict(zip(keys, vals, strict=True))
                 metrics["temperature"] = T
                 for cb in callbacks:
                     cb.on_step_end(gen, step_m1, "SA", metrics)

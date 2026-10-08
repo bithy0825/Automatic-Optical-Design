@@ -119,7 +119,7 @@ class GeneticAlgorithm:
                     + [loss.float().mean()]
                 ).tolist()
                 for cb in callbacks:
-                    cb.on_gen_end(gen, dict(zip(keys, vals)))
+                    cb.on_gen_end(gen, dict(zip(keys, vals, strict=True)))
 
 
 def _damping(

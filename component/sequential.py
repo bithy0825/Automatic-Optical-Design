@@ -3,7 +3,14 @@ from typing import Any, Self, cast, override
 
 from torch import nn
 
-from core import Noun, OpticalModule, SystemBoolScalar, SystemLongScalar, TraceFlow, term
+from core import (
+    Noun,
+    OpticalModule,
+    SystemBoolScalar,
+    SystemLongScalar,
+    TraceFlow,
+    term,
+)
 from core.repr import styled
 from component.protocol import Component
 from component.refractor import Refractor

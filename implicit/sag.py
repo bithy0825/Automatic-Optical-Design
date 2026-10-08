@@ -108,10 +108,10 @@ def aspheric_sag(
 
     # 小指数张量预算一次（闭包随 forward 每次重建，dtype/device 跟随当前参数）
     i = torch.arange(alpha.shape[-1], dtype=alpha.dtype, device=alpha.device)
-    p1 = i.add(1.0)          # u 的幂次：1 + i
-    p2 = i.add(2.0)          # u 的幂次：2 + i
+    p1 = i.add(1.0)  # u 的幂次：1 + i
+    p2 = i.add(2.0)  # u 的幂次：2 + i
     c1 = i.mul(2.0).add(4.0)  # 系数：4 + 2i
-    c12 = c1.mul(p1)         # 系数：(4 + 2i)(1 + i)
+    c12 = c1.mul(p1)  # 系数：(4 + 2i)(1 + i)
 
     def sag_fn(points: RayFloat2D, *, order: _Order) -> FieldResult:
         x, y = points.unbind(dim=-1)
@@ -125,9 +125,9 @@ def aspheric_sag(
 
         # ── 多项式（先算 u = r²/ρ² 再取幂，避免大半径高次幂溢出）──
         rho_sq = broadcast_system_to_ray(normalization, r2).square()
-        u = sturdy_div(r2, rho_sq)            # u = r²/ρ²
+        u = sturdy_div(r2, rho_sq)  # u = r²/ρ²
         alpha_b = _broadcast_coeff(alpha, r2)  # (P,F,W,N,Ncoeff)
-        u_e = u.unsqueeze(-1)                  # [...,1]
+        u_e = u.unsqueeze(-1)  # [...,1]
 
         # 矢高: Σ α_n · u^(2+n)
         sag_poly = alpha_b.mul(u_e.pow(p2)).sum(dim=-1).mul(valid)

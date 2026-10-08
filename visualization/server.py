@@ -37,8 +37,9 @@ def system_meta(seq: Sequential, target: Target | None) -> dict:
     for i, comp in enumerate(seq):
         if isinstance(comp, Refractor):
             n += 1
-            surfaces.append({"index": i, "label": f"S{n}",
-                             "kind": str(comp.shape.kind.canonical)})
+            surfaces.append(
+                {"index": i, "label": f"S{n}", "kind": str(comp.shape.kind.canonical)}
+            )
         elif isinstance(comp, Sensor):
             surfaces.append({"index": i, "label": "Sensor", "kind": "sensor"})
     return {
@@ -47,8 +48,13 @@ def system_meta(seq: Sequential, target: Target | None) -> dict:
         "fields_deg": fields_deg.tolist(),
         "wavelengths_nm": wls.tolist(),
         "surfaces": surfaces,
-        "target": None if target is None else {
-            "id": target.id, "fov": target.fov, "F": target.F, "effl": target.effl,
+        "target": None
+        if target is None
+        else {
+            "id": target.id,
+            "fov": target.fov,
+            "F": target.F,
+            "effl": target.effl,
         },
     }
 
@@ -60,7 +66,9 @@ class _Error(Exception):
         self.message = message
 
 
-def _int_param(qs: dict[str, list[str]], name: str, default: int, *, lo: int, hi: int) -> int:
+def _int_param(
+    qs: dict[str, list[str]], name: str, default: int, *, lo: int, hi: int
+) -> int:
     raw = qs.get(name, [str(default)])[0]
     try:
         value = int(raw)
@@ -125,7 +133,9 @@ def create_server(
                     density = _int_param(qs, "density", 16, lo=2, hi=64)
                     sampling = qs.get("sampling", ["uniform"])[0]
                     if sampling not in ("uniform", "fibonacci"):
-                        raise _Error(400, f"sampling must be uniform|fibonacci, got {sampling!r}")
+                        raise _Error(
+                            400, f"sampling must be uniform|fibonacci, got {sampling!r}"
+                        )
                     self._binary(cache.spot_packet(pop, density, sampling))
                 case "/api/psf":
                     pop = _int_param(qs, "pop", 0, lo=0, hi=P - 1)
@@ -134,10 +144,18 @@ def create_server(
                     delta = _float_param(qs, "delta", 0.0, lo=0.0, hi=10.0)
                     sampling = qs.get("sampling", ["fibonacci"])[0]
                     if sampling not in ("uniform", "fibonacci"):
-                        raise _Error(400, f"sampling must be uniform|fibonacci, got {sampling!r}")
-                    self._binary(cache.psf_packet(
-                        pop, density, sampling, size, None if delta == 0.0 else delta
-                    ))
+                        raise _Error(
+                            400, f"sampling must be uniform|fibonacci, got {sampling!r}"
+                        )
+                    self._binary(
+                        cache.psf_packet(
+                            pop,
+                            density,
+                            sampling,
+                            size,
+                            None if delta == 0.0 else delta,
+                        )
+                    )
                 case "/psf":
                     self._static("psf.html")
                 case "/":
@@ -171,7 +189,8 @@ def create_server(
             body = path.read_bytes()
             self.send_response(200)
             self.send_header(
-                "Content-Type", _CONTENT_TYPES.get(path.suffix, "application/octet-stream")
+                "Content-Type",
+                _CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             )
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache")  # 开发期避免陈旧 dist 缓存
@@ -199,7 +218,9 @@ def serve(
     )
     url = f"http://127.0.0.1:{server.server_address[1]}"
     if not (_WEB_ROOT / "dist").is_dir():
-        print("[visualization] web/dist 不存在,请先在 visualization/web 下执行 bun run build")
+        print(
+            "[visualization] web/dist 不存在,请先在 visualization/web 下执行 bun run build"
+        )
     print(f"[visualization] serving at {url}  (Ctrl+C 退出)")
     if open_browser:
         webbrowser.open(url)

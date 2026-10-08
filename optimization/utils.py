@@ -9,7 +9,12 @@ from core import term
 from component import Sequential
 from optimization.annealing import SAOptions, SimulatedAnnealing
 from optimization.genetic import Stager
-from optimization.gradient import AdamOptions, AdamWOptions, GradientOptimizer, SGDOptions
+from optimization.gradient import (
+    AdamOptions,
+    AdamWOptions,
+    GradientOptimizer,
+    SGDOptions,
+)
 from optimization.target import Target
 
 
@@ -42,9 +47,7 @@ def build_sequential(
 
     target_spec = target.to_dict()
     components = [
-        {**comp, **target_spec}
-        if term.SOURCE.match(term.TYPE.resolve(comp))
-        else comp
+        {**comp, **target_spec} if term.SOURCE.match(term.TYPE.resolve(comp)) else comp
         for comp in term.COMPONENT.resolve(cfg)
     ]
 

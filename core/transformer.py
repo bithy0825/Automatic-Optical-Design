@@ -64,7 +64,9 @@ class Transformer(TensorContainer):
         )
         outer = k.unsqueeze(-1).mul(k.unsqueeze(-2))
         eye3 = torch.eye(3, device=axis.device, dtype=axis.dtype)
-        rot = c.mul(eye3).add(K.mul(s)).add(outer.mul(c.neg().add(1.0)))  # 罗德里格斯旋转公式
+        rot = (
+            c.mul(eye3).add(K.mul(s)).add(outer.mul(c.neg().add(1.0)))
+        )  # 罗德里格斯旋转公式
 
         bottom = F.pad(k.new_ones(B, 1), (3, 0)).unsqueeze(-2)
         fwd = torch.cat((F.pad(rot, (0, 1)), bottom), dim=-2)

@@ -176,7 +176,7 @@ class GradientOptimizer:
                 # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
                 keys = list(parts)
                 vals = torch.stack([parts[k].detach().mean() for k in keys]).tolist()
-                metrics = dict(zip(keys, vals))
+                metrics = dict(zip(keys, vals, strict=True))
                 for cb in callbacks:
                     cb.on_step_end(gen, step, self._stage, metrics)
 
@@ -186,7 +186,7 @@ class GradientOptimizer:
             return None
         # 逐代重启退火：余弦/指数类调度按"当前 lr"递推，上一代末尾 lr≈0
         # 会把后续所有代锁死在 0——重建前先把各组 lr 重置回基准值。
-        for group, base in zip(self._opt.param_groups, self._base_lrs):
+        for group, base in zip(self._opt.param_groups, self._base_lrs, strict=True):
             group["lr"] = base
         match opts.scheduler:
             case "cosine":

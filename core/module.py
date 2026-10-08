@@ -151,13 +151,9 @@ class OpticalModule(nn.Module, ABC):
     ) -> None:
         """``where`` 操作数校验：同类型、同种群、mask 为 ``(P,)`` bool。"""
         if type(new) is not type(old):
-            raise TypeError(
-                f"where: {type(new).__name__} vs {type(old).__name__}"
-            )
+            raise TypeError(f"where: {type(new).__name__} vs {type(old).__name__}")
         if new.population != old.population:
-            raise ValueError(
-                f"where: population {new.population} vs {old.population}"
-            )
+            raise ValueError(f"where: population {new.population} vs {old.population}")
         if mask.dtype != torch.bool or mask.shape != (new.population,):
             raise ValueError(
                 f"where: mask must be a ({new.population},) bool tensor, "

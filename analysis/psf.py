@@ -35,14 +35,14 @@ _NM_TO_MM: float = 1e-6
 class _Trace:
     """追迹快照:末折射面状态 + 传感器数据 + 逐光线光程。"""
 
-    points: Tensor        # (P,F,W,N,3) 末折射面命中点(全局)
-    dirs: Tensor          # (P,F,W,N,3) 末折射面出射方向
-    opl: Tensor           # (P,F,W,N) 快照处累积光程 mm
-    n_img: Tensor         # (P,F,W,N) 像方折射率(逐光线波长)
-    sensor_pts: Tensor    # (P,F,W,N,3) 传感器命中点(全局)
+    points: Tensor  # (P,F,W,N,3) 末折射面命中点(全局)
+    dirs: Tensor  # (P,F,W,N,3) 末折射面出射方向
+    opl: Tensor  # (P,F,W,N) 快照处累积光程 mm
+    n_img: Tensor  # (P,F,W,N) 像方折射率(逐光线波长)
+    sensor_pts: Tensor  # (P,F,W,N,3) 传感器命中点(全局)
     sensor_tf: Transformer  # 传感器局部坐标系
-    alive: Tensor         # (P,F,W,N) 传感器处最终存活
-    wavelengths: Tensor   # (W,) nm
+    alive: Tensor  # (P,F,W,N) 传感器处最终存活
+    wavelengths: Tensor  # (W,) nm
 
 
 def _eval_seq(seq: Sequential, pupil: SampleOptions | None) -> Sequential:
@@ -157,12 +157,12 @@ def _trace_eval(seq: Sequential) -> _Trace:
 class _Sphere:
     """参考球:球面点、内法向、球面 OPD、有效掩码、球心与半径。"""
 
-    points: Tensor      # (P,F,W,N,3) 球面交点(全局)
-    normals: Tensor     # (P,F,W,N,3) 指向球心的单位内法向
-    opd: Tensor         # (P,F,W,N) 球面光程差 mm(主光线为零点,无效 nan)
-    valid: Tensor       # (P,F,W,N) 参与积分掩码
-    centers_g: Tensor   # (P,F,W,3) 球心 = 主光线像点(全局)
-    radius: Tensor      # (P,F,W) 球半径 mm
+    points: Tensor  # (P,F,W,N,3) 球面交点(全局)
+    normals: Tensor  # (P,F,W,N,3) 指向球心的单位内法向
+    opd: Tensor  # (P,F,W,N) 球面光程差 mm(主光线为零点,无效 nan)
+    valid: Tensor  # (P,F,W,N) 参与积分掩码
+    centers_g: Tensor  # (P,F,W,3) 球心 = 主光线像点(全局)
+    radius: Tensor  # (P,F,W) 球半径 mm
 
 
 def _reference_sphere(tr: _Trace) -> _Sphere:
@@ -172,35 +172,37 @@ def _reference_sphere(tr: _Trace) -> _Sphere:
     其他视场中位数,全部病态再回退主光线末面点。精确距离核下 R 的小误差
     只影响采样经济性,不影响核的正确性。
     """
-    chief_alive = tr.alive[..., 0]                       # (P,F,W)
+    chief_alive = tr.alive[..., 0]  # (P,F,W)
     w = tr.alive.unsqueeze(-1).to(tr.sensor_pts.dtype)
     centroid = (tr.sensor_pts * w).sum(dim=-2) / w.sum(dim=-2).clamp_min(1.0)
     # 主光线死亡 → 存活质心兜底(仅影响中心定义;活塞相位不影响强度)
-    centers_g = torch.where(chief_alive.unsqueeze(-1), tr.sensor_pts[..., 0, :], centroid)
+    centers_g = torch.where(
+        chief_alive.unsqueeze(-1), tr.sensor_pts[..., 0, :], centroid
+    )
 
-    c0, d0 = tr.points[..., 0, :], tr.dirs[..., 0, :]    # (P,F,W,3) 主光线
+    c0, d0 = tr.points[..., 0, :], tr.dirs[..., 0, :]  # (P,F,W,3) 主光线
     dxy2 = d0[..., :2].square().sum(dim=-1)
     ok = dxy2 > 1e-12
     t_star = -(c0[..., :2] * d0[..., :2]).sum(dim=-1) / dxy2.clamp_min(1e-300)
     z_cross = c0[..., 2] + t_star * d0[..., 2]
     z_sel = torch.where(ok, z_cross, torch.full_like(z_cross, float("nan")))
-    med = z_sel.nanmedian(dim=1, keepdim=True).values    # (P,1,W) 视场维中位数
+    med = z_sel.nanmedian(dim=1, keepdim=True).values  # (P,1,W) 视场维中位数
     z_ep = torch.where(ok, z_cross, med.expand_as(z_cross))
-    z_ep = torch.where(z_ep.isnan(), c0[..., 2], z_ep)   # 全病态:主光线末面点
+    z_ep = torch.where(z_ep.isnan(), c0[..., 2], z_ep)  # 全病态:主光线末面点
     ep = torch.stack(
         (torch.zeros_like(z_ep), torch.zeros_like(z_ep), z_ep), dim=-1
-    )                                                    # (P,F,W,3) 出瞳中心(光轴上)
+    )  # (P,F,W,3) 出瞳中心(光轴上)
     radius = (centers_g - ep).norm(dim=-1).clamp_min(1e-9)
 
     # 光线-球解析求交:|X + t·d − C|² = R²,取前方根(朝球心会聚的一侧)
-    m = tr.points - centers_g.unsqueeze(-2)              # (P,F,W,N,3)
-    b = (tr.dirs * m).sum(dim=-1)                        # (P,F,W,N)
+    m = tr.points - centers_g.unsqueeze(-2)  # (P,F,W,N,3)
+    b = (tr.dirs * m).sum(dim=-1)  # (P,F,W,N)
     disc = b.square() - m.square().sum(dim=-1) + radius.unsqueeze(-1).square()
     hit = disc > 0
     t = -b - disc.clamp_min(0).sqrt()
     points = tr.points + t.unsqueeze(-1) * tr.dirs
     opl = tr.opl + t * tr.n_img
-    opd = opl - opl[..., :1]                             # 主光线(N=0)为零点
+    opd = opl - opl[..., :1]  # 主光线(N=0)为零点
     normals = (centers_g.unsqueeze(-2) - points) / radius.unsqueeze(-1).unsqueeze(-1)
     valid = tr.alive & hit
     opd = torch.where(valid, opd, torch.full_like(opd, float("nan")))
@@ -211,12 +213,12 @@ def _reference_sphere(tr: _Trace) -> _Sphere:
 class PsfResult:
     """逐波长单色 PSF 与诊断。所有张量 float64,位于 seq.device。"""
 
-    psf: Tensor          # (P,F,W,H,H) 每张能量归一(Σ=1);psf[...,i,j] ↔ (x_i, y_j)
-    delta: float         # 像面采样间隔 mm/px(自动建议时为实际使用值)
-    centers: Tensor      # (P,F,W,2) 网格中心(传感器局部 xy, mm)
-    opd: Tensor          # (P,F,W,N) 参考球光程差 mm(主光线为零点,无效光线 nan)
-    alive: Tensor        # (P,F,W,N) 参与积分的光线掩码
-    na: Tensor           # (P,F,W) 像方数值孔径(相对主光线最大半角正弦)
+    psf: Tensor  # (P,F,W,H,H) 每张能量归一(Σ=1);psf[...,i,j] ↔ (x_i, y_j)
+    delta: float  # 像面采样间隔 mm/px(自动建议时为实际使用值)
+    centers: Tensor  # (P,F,W,2) 网格中心(传感器局部 xy, mm)
+    opd: Tensor  # (P,F,W,N) 参考球光程差 mm(主光线为零点,无效光线 nan)
+    alive: Tensor  # (P,F,W,N) 参与积分的光线掩码
+    na: Tensor  # (P,F,W) 像方数值孔径(相对主光线最大半角正弦)
     warnings: list[str]  # 采样充分性诊断
 
 
@@ -253,7 +255,7 @@ def psf_kirchhoff(
     centers = tr.sensor_tf.transform_points(sp.centers_g, inverse=True)[..., :2]
 
     # ---- 像方 NA:存活光线相对主光线方向的最大半角正弦 ----
-    d0 = tr.dirs[..., 0:1, :]                                   # (P,F,W,1,3)
+    d0 = tr.dirs[..., 0:1, :]  # (P,F,W,1,3)
     cosang = (tr.dirs * d0).sum(dim=-1).clamp(-1.0, 1.0)
     sinang = cosang.square().neg().add(1.0).clamp_min(0).sqrt()
     na = torch.where(sp.valid, sinang, torch.zeros_like(sinang)).amax(dim=-1)
@@ -261,7 +263,7 @@ def psf_kirchhoff(
     if na_max <= 0:
         raise RuntimeError("没有存活光线,无法计算 PSF")
 
-    lam_mm = tr.wavelengths.to(dtype) * _NM_TO_MM               # (W,)
+    lam_mm = tr.wavelengths.to(dtype) * _NM_TO_MM  # (W,)
     lam_min = float(lam_mm.min())
     delta_nyq = lam_min / (4.0 * na_max)
     if image_delta is None:
@@ -278,8 +280,8 @@ def psf_kirchhoff(
     # torch 2.11 无 nanmax/nanmin:无效光线以 ∓inf 填充后用 amax/amin,语义相同
     pos = torch.where(sp.valid, sp.opd, torch.full_like(sp.opd, float("-inf")))
     neg = torch.where(sp.valid, sp.opd, torch.full_like(sp.opd, float("inf")))
-    ptv = pos.amax(dim=-1) - neg.amin(dim=-1)           # (P,F,W)
-    waves = (ptv / lam_mm).max()                        # 最大波前峰谷(波长数)
+    ptv = pos.amax(dim=-1) - neg.amin(dim=-1)  # (P,F,W)
+    waves = (ptv / lam_mm).max()  # 最大波前峰谷(波长数)
     n_alive = int(sp.valid.sum(dim=-1).min())
     need = int((2.0 * float(waves)) ** 2)
     if torch.isfinite(waves) and n_alive < need:
@@ -290,14 +292,14 @@ def psf_kirchhoff(
 
     # ---- 采样网格(传感器局部 → 全局) ----
     g = (torch.arange(H, device=device, dtype=dtype) - (H - 1) / 2) * delta
-    qx, qy = torch.meshgrid(g, g, indexing="ij")        # (H,H);i↔x, j↔y
-    q_loc = torch.stack((qx, qy, torch.zeros_like(qx)), dim=-1)         # (H,H,3)
+    qx, qy = torch.meshgrid(g, g, indexing="ij")  # (H,H);i↔x, j↔y
+    q_loc = torch.stack((qx, qy, torch.zeros_like(qx)), dim=-1)  # (H,H,3)
     c3 = torch.cat((centers, torch.zeros_like(centers[..., :1])), dim=-1)
     q_loc = q_loc.view(1, 1, 1, H, H, 3) + c3.view(P, F, W, 1, 1, 3)
-    Q = tr.sensor_tf.transform_points(q_loc)            # (P,F,W,H,H,3) 全局
+    Q = tr.sensor_tf.transform_points(q_loc)  # (P,F,W,H,H,3) 全局
 
     # ---- Kirchhoff 积分:U(Q) = Σ_r K·exp(i·k0·(OPD + n_img·|r|)) ----
-    k0 = 2.0 * torch.pi / lam_mm                        # (W,)
+    k0 = 2.0 * torch.pi / lam_mm  # (W,)
     psf = torch.zeros(P, F, W, H, H, device=device, dtype=dtype)
     for p in range(P):
         for f in range(F):
@@ -307,23 +309,25 @@ def psf_kirchhoff(
                 if n_v == 0:
                     warnings.append(f"pop={p} field={f} λidx={w}: 无存活光线")
                     continue
-                S = sp.points[p, f, w][valid]           # (Nv,3)
+                S = sp.points[p, f, w][valid]  # (Nv,3)
                 nrm = sp.normals[p, f, w][valid]
-                opd = sp.opd[p, f, w][valid]            # (Nv,)
+                opd = sp.opd[p, f, w][valid]  # (Nv,)
                 dirs = tr.dirs[p, f, w][valid]
                 n_img = tr.n_img[p, f, w][valid]
-                q = Q[p, f, w]                          # (H,H,3)
+                q = Q[p, f, w]  # (H,H,3)
                 amp = torch.zeros(H, H, device=device, dtype=torch.complex128)
                 for s in range(0, n_v, chunk):
-                    Sc = S[s : s + chunk]                       # (Nc,3)
-                    r = q.unsqueeze(-2) - Sc                    # (H,H,Nc,3)
-                    rho = r.norm(dim=-1).clamp_min(1e-300)      # (H,H,Nc)
+                    Sc = S[s : s + chunk]  # (Nc,3)
+                    r = q.unsqueeze(-2) - Sc  # (H,H,Nc,3)
+                    rho = r.norm(dim=-1).clamp_min(1e-300)  # (H,H,Nc)
                     phase = (opd[s : s + chunk] + n_img[s : s + chunk] * rho) * k0[w]
-                    nrmc = nrm[s : s + chunk]                   # (Nc,3)
-                    cos_i = (dirs[s : s + chunk] * nrmc).sum(dim=-1)            # (Nc,)
-                    cos_d = (r / rho.unsqueeze(-1) * nrmc).sum(dim=-1)          # (H,H,Nc)
-                    k_obl = 0.5 * (cos_i + cos_d)               # Kirchhoff 倾斜因子
-                    amp = amp + (k_obl * torch.exp(1j * phase.to(torch.complex128))).sum(dim=-1)
+                    nrmc = nrm[s : s + chunk]  # (Nc,3)
+                    cos_i = (dirs[s : s + chunk] * nrmc).sum(dim=-1)  # (Nc,)
+                    cos_d = (r / rho.unsqueeze(-1) * nrmc).sum(dim=-1)  # (H,H,Nc)
+                    k_obl = 0.5 * (cos_i + cos_d)  # Kirchhoff 倾斜因子
+                    amp = amp + (
+                        k_obl * torch.exp(1j * phase.to(torch.complex128))
+                    ).sum(dim=-1)
                 psf[p, f, w] = amp.abs().square()
 
     # ---- 归一(每张 Σ=1)与边缘截断诊断 ----
@@ -331,7 +335,7 @@ def psf_kirchhoff(
     psf = torch.where(total > 0, psf / total.clamp_min(1e-300), psf)
     edge = torch.zeros(H, H, dtype=torch.bool, device=device)
     edge[:2, :] = edge[-2:, :] = edge[:, :2] = edge[:, -2:] = True
-    edge_frac = psf.mul(edge).sum(dim=(-2, -1)).max()   # psf 已归一,即边缘能量占比
+    edge_frac = psf.mul(edge).sum(dim=(-2, -1)).max()  # psf 已归一,即边缘能量占比
     if float(edge_frac) > 0.02:
         warnings.append(
             f"PSF 边缘能量占比 {float(edge_frac):.1%} > 2%,网格可能过小(截断)"

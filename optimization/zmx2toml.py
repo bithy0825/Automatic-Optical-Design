@@ -10,8 +10,9 @@
 仅支持:STANDARD(球面/圆锥面)、EVENASPH(偶次非球面)、平面 STOP、像面;
 EFFL / F 数 / 视场角按推断链解析。材料只允许玻璃与空气:玻璃一律 sellmeier
 随机(只借 zmx 的结构),含浸液等非玻璃介质(水/油)的处方直接过滤。
-两侧同为空气的哑面不参与折射,转换前删除并折并厚度;
-平面光阑若携带玻璃则退化为折射面,以免丢失其后介质。
+两侧同为空气的面不参与折射:平面判为光阑(多光阑,保留口径裁切),曲面
+判无效删除并折并厚度;空气中的光阑不论曲率一律转平面光阑,携带玻璃或
+前承玻璃的曲面光阑则退化为折射面,以免丢失光焦度。
 """
 
 from __future__ import annotations
@@ -200,8 +201,11 @@ def _ynu_effl(optical: list[Surface]) -> float | None:
     占位符玻璃全或无地换用库值:只换可解析的子集会造成折射率体系不一致
     (部分 1.5 部分真值),追迹反而失真——任一占位玻璃不可解析则全部用内联值。
     """
-    ph = [s for s in optical if s.glass and (s.nd, s.vd) == _PLACEHOLDER_NV]
-    db_first = bool(ph) and all(_db_nd(s.glass) is not None for s in ph)
+    ph: list[str] = []
+    for s in optical:
+        if s.glass and (s.nd, s.vd) == _PLACEHOLDER_NV:
+            ph.append(s.glass)
+    db_first = bool(ph) and all(_db_nd(g) is not None for g in ph)
     y, n_u, n_prev = 1.0, 0.0, 1.0
     for i, s in enumerate(optical):
         n_next = _medium_nd(s, db_first=db_first)
@@ -273,8 +277,9 @@ def infer_fov(zmx: Zmx, effl: float) -> float:
                 theta = math.degrees(math.atan(hmax / obj))
         else:  # 2/3:像高 → 按焦距换算
             theta = math.degrees(math.atan(hmax / effl))
-    if not 0 < theta < 90:
+    if theta <= 0:  # 无视场信息:按焦距自动推断
         theta = _auto_fov(effl)
+    # θ≥90°(鱼眼/垃圾视场 spec)不再被 auto 兜底掩盖,交给 convert 的 >45° 过滤
     return theta
 
 
@@ -338,7 +343,7 @@ def _domain_cmax(s: Surface, D: int) -> float | None:
     return 1.0 / (math.sqrt(1.0 + s.coni) * (D / 2))
 
 
-def _header(stem: str, effl: float, fnum: float, theta: float, lead: float = 0.0) -> str:
+def _header(stem: str, effl: float, fnum: float, theta: float) -> str:
     return f'''[target]
 fov = [[0, {_f(round(theta, 3))}], [0, 0]]
 F = {_f(round(fnum, 3))}
@@ -378,7 +383,7 @@ wavel = {{ method = "uniform", region = "line", count = 3 }}
 
 [[component]]
 type = "gap"
-thickness = {{ method = "raw", value = {_f(round(max(lead, 0.0), 3))} }}'''
+thickness = {{ method = "raw", value = 0.0 }}'''
 
 
 def _diameter_of(s: Surface) -> int:
@@ -413,7 +418,10 @@ def _refractor(s: Surface, *, allow_negative: bool, std_scale: float = 1.0) -> s
     c_std = _init_std(c, 0.01, std_scale)
     cmax = _domain_cmax(s, D)
     if cmax is not None:
-        c_std = min(c_std, max(0.005, (0.9 * cmax - abs(c)) / 3.0))
+        # 半球域上限:大口径面(长焦/航拍)若放任 0.005 下限与 ±0.1 走廊,
+        # 初始化与变异会采样到 c·ρ>1 的几何不可能区(矢高域全灭)。
+        # std 下限改为相对域限;走廊收进 0.95·cmax。
+        c_std = min(c_std, max(0.05 * cmax, (0.9 * cmax - abs(c)) / 3.0))
     k_std = _init_std(s.coni, 0.05, std_scale) if shape != "sphere" else 0.0
 
     lines = ["[[component]]", 'type = "refractor"', f'shape = "{shape}"']
@@ -443,7 +451,10 @@ def _refractor(s: Surface, *, allow_negative: bool, std_scale: float = 1.0) -> s
 
     train = ["curvature"]
     mutate = [f"curvature = {_f(c_std / 2)}"]
-    bounds = [f"curvature = {_bounds(c, -0.1, 0.1)}"]
+    clo, chi = -0.1, 0.1
+    if cmax is not None:
+        clo, chi = max(clo, -0.95 * cmax), min(chi, 0.95 * cmax)
+    bounds = [f"curvature = {_bounds(c, clo, chi)}"]
     if shape != "sphere":
         train.append("kappa")
         mutate.append(f"kappa = {_f(k_std / 2)}")
@@ -524,38 +535,49 @@ def _sensor(effl: float, theta: float) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _drop_noop_surfaces(optical: list[Surface]) -> tuple[list[Surface], float]:
-    """删除空-空哑面并折并厚度;返回 (保留面, 折入光源间隙的厚度)。
+def _is_flat(s: Surface) -> bool:
+    """几何平面:无曲率且无非球面项(PARM 1 已折入 curv,余项≥2 即有矢高)。"""
+    return s.curv == 0.0 and not s.parms
 
-    前后介质同为空气的面(无论平/曲)不参与折射,只是占位/标记:删除之,
-    其 DISZ 累进前一保留面的 DISZ(首段无处可折,累进光源间隙)。
-    口径守卫:哑面口径小于任一相邻保留面时保留,以免删面改变口径裁切。
+
+def _drop_noop_surfaces(optical: list[Surface]) -> list[Surface]:
+    """删除空-空无效面并折并厚度;返回保留面。
+
+    前后介质同为空气的面不参与折射(同介质,任意曲率均无光焦度):曲面判
+    无效删除,其 DISZ 累进前一保留面的 DISZ;平面保留,由 convert 判为光阑
+    (多光阑,裁切职责不丢)。首段无效面(光源与首面之间)的厚度**丢弃**:
+    框架光源是无穷远共轭模型(视场角 + F 数定义光束),物方间距不属于镜头
+    结构——折叠进去只会让轴外光束按 间距×tanθ 平移而错过首面(离轴全灭)。
     光阑面永不删除。
     """
     kept: list[Surface] = []
-    lead = 0.0
     i = 0
     while i < len(optical):
         s = optical[i]
-        if s.is_stop or s.glass is not None or (kept and kept[-1].glass is not None):
+        if (
+            s.is_stop
+            or s.glass is not None
+            or _is_flat(s)
+            or (kept and kept[-1].glass is not None)
+        ):
             kept.append(s)
             i += 1
             continue
-        j = i  # 连续哑面段 [i, j)(段内互为空气,天然满足同介质前提)
-        while j < len(optical) and not optical[j].is_stop and optical[j].glass is None:
+        j = i  # 连续无效面段 [i, j)(空-空曲面;平面与光阑在段外保留)
+        while (
+            j < len(optical)
+            and not optical[j].is_stop
+            and optical[j].glass is None
+            and not _is_flat(optical[j])
+        ):
             j += 1
-        neighbors = [x for x in (kept[-1] if kept else None, optical[j] if j < len(optical) else None) if x is not None]
-        limit = max((x.diam for x in neighbors), default=0.0)
-        if all(s.diam >= limit for s in optical[i:j]):
-            fold = sum(s.disz or 0.0 for s in optical[i:j])
-            if kept:
-                kept[-1].disz = (kept[-1].disz or 0.0) + fold
-            else:
-                lead += fold
-        else:
-            kept.extend(optical[i:j])
+        if kept:
+            kept[-1].disz = (kept[-1].disz or 0.0) + sum(
+                s.disz or 0.0 for s in optical[i:j]
+            )
+        # 首段:丢弃间距(见 docstring)
         i = j
-    return kept, lead
+    return kept
 
 
 def convert(path: Path) -> str:
@@ -602,7 +624,7 @@ def convert(path: Path) -> str:
         if a1 != 0.0:  # r² 项折入曲率(近轴 z ≈ (c + 2·a1)·r²/2),保留更高次项
             s.curv += 2.0 * a1
 
-    optical, lead = _drop_noop_surfaces(optical)
+    optical = _drop_noop_surfaces(optical)
     if not optical:
         raise Skip("no optical surfaces")
 
@@ -613,11 +635,18 @@ def convert(path: Path) -> str:
         raise Skip(f"extreme FOV ({theta:.1f}°)")
 
     std_scale = _fov_std_scale(theta)
-    parts = [_header(path.stem, effl, fnum, theta, lead)]
+    parts = [_header(path.stem, effl, fnum, theta)]
     # allow_negative 只给链上第一个面(与光源同面,t≈0 的数值噪声/首面负曲率
     # 的合法负根);中间面负距离=X 型打架,必须保持判死
     for i, s in enumerate(optical):
-        if s.is_stop and s.curv == 0.0 and s.glass is None:
+        prev_air = i == 0 or optical[i - 1].glass is None
+        # 光阑判定:正常光阑(STOP 标记;空气中的光阑任意曲率均无光焦度,一
+        # 并按平面光阑转换)+ 空-空平面(判为光阑,多光阑,保留其口径裁切)。
+        # 携带玻璃或前承玻璃的曲面光阑退化为折射面,以免丢失光焦度。
+        stop_plane = s.glass is None and (
+            (s.is_stop and (_is_flat(s) or prev_air)) or (prev_air and _is_flat(s))
+        )
+        if stop_plane:
             parts.append(_stop(s, front=i == 0, std_scale=std_scale))
         else:
             parts.append(_refractor(s, allow_negative=i == 0, std_scale=std_scale))
