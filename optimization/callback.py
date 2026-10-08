@@ -1,4 +1,4 @@
-"""优化回调协议与内置实现。"""
+"""优化回调协议与内置实现（损失历史 / 双层进度条 / 滚动存档）。"""
 
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,14 +10,14 @@ from component import Sequential
 
 
 class Callback(Protocol):
-    def on_step_end(
-        self, gen: int, step: int, stage: str, metrics: dict[str, Any]
-    ) -> None: ...
+    """优化回调：``on_step_end``（每优化步）与 ``on_gen_end``（每代末）。"""
+
+    def on_step_end(self, gen: int, step: int, stage: str, metrics: dict[str, Any]) -> None: ...
     def on_gen_end(self, gen: int, metrics: dict[str, Any]) -> None: ...
 
 
 class LossHistory:
-    """损失历史:step 级记录按 ``every`` 稀释(默认每 20 步一条),代末必记。"""
+    """损失历史：step 级记录按 ``every`` 稀释（默认每 20 步一条），代末必记。"""
 
     def __init__(self, every: int = 20) -> None:
         if every < 1:
@@ -25,9 +25,7 @@ class LossHistory:
         self.every = every
         self.records: list[dict[str, Any]] = []
 
-    def on_step_end(
-        self, gen: int, step: int, stage: str, metrics: dict[str, Any]
-    ) -> None:
+    def on_step_end(self, gen: int, step: int, stage: str, metrics: dict[str, Any]) -> None:
         if (step + 1) % self.every == 0:
             self.records.append({"gen": gen, "step": step, "stage": stage, **metrics})
 
@@ -42,18 +40,14 @@ class ProgressBar:
     阶段切换时同步切换内层总数（阶段名大小写不敏感，如 sa/SA）。
     """
 
-    def __init__(
-        self, total_gen: int, total_steps: int | Mapping[str, int] = 0
-    ) -> None:
+    def __init__(self, total_gen: int, total_steps: int | Mapping[str, int] = 0) -> None:
         self.gen_bar = tqdm(total=total_gen, desc="GA", position=0, unit="gen")
         self._totals = (
             {k.lower(): int(v) for k, v in total_steps.items()}
             if isinstance(total_steps, Mapping)
             else {}
         )
-        self._default_total = (
-            max(self._totals.values(), default=0) if self._totals else total_steps
-        )
+        self._default_total = max(self._totals.values(), default=0) if self._totals else total_steps
         self.step_bar = (
             tqdm(
                 total=self._default_total,  # type: ignore
@@ -68,9 +62,7 @@ class ProgressBar:
         self._last_gen = -1
         self._last_stage = ""
 
-    def on_step_end(
-        self, gen: int, step: int, stage: str, metrics: dict[str, Any]
-    ) -> None:
+    def on_step_end(self, gen: int, step: int, stage: str, metrics: dict[str, Any]) -> None:
         if stage != self._last_stage:
             if self.step_bar:
                 self.step_bar.reset(
@@ -98,17 +90,13 @@ class ProgressBar:
 class PeriodicSaver:
     """每 ``every`` 代把检查点滚动覆盖保存到 ``path``（与最终存档同路径）。"""
 
-    def __init__(
-        self, seq: Sequential, cfg: Mapping[str, Any], path: Path, every: int
-    ) -> None:
+    def __init__(self, seq: Sequential, cfg: Mapping[str, Any], path: Path, every: int) -> None:
         self.seq = seq
         self.cfg = cfg
         self.path = path
         self.every = every
 
-    def on_step_end(
-        self, gen: int, step: int, stage: str, metrics: dict[str, Any]
-    ) -> None:
+    def on_step_end(self, gen: int, step: int, stage: str, metrics: dict[str, Any]) -> None:
         pass
 
     def on_gen_end(self, gen: int, metrics: dict[str, Any]) -> None:

@@ -1,4 +1,4 @@
-"""模拟退火：无梯度，Metropolis 接受 + ``where`` 逐个体择优。"""
+"""模拟退火：无梯度，Metropolis 接受 + ``where_`` 原地逐个体择优。"""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ from typing import Any, Literal, Self
 import torch
 
 from component import Sequential
+from core import term
 from optimization.callback import Callback
 from optimization.loss import LossWeights, total_loss
 from optimization.target import Target
@@ -14,24 +15,29 @@ from optimization.target import Target
 
 @dataclass(slots=True)
 class SAOptions:
+    """模拟退火选项。"""
+
     step: int = 200
-    T0: float = 1.0
-    T1: float = 0.001
+    T0: float = 1.0  # 初始温度
+    T1: float = 0.001  # 末态温度
     cooling: Literal["exponential", "linear", "logarithmic"] = "exponential"
 
     @classmethod
     def from_options(cls, cfg: Mapping[str, Any] | None = None) -> Self:
+        """从 ``[[optimizer]]`` 配置块构造；``None`` → 全默认。"""
         if cfg is None:
             return cls()
         return cls(
-            step=int(cfg.get("step", 200)),
-            T0=float(cfg.get("T0", 1.0)),
-            T1=float(cfg.get("T1", 0.001)),
-            cooling=cfg.get("cooling", "exponential"),
+            step=int(term.STEP.resolve(cfg, default=200)),
+            T0=float(term.T0.resolve(cfg, default=1.0)),
+            T1=float(term.T1.resolve(cfg, default=0.001)),
+            cooling=term.COOLING.resolve(cfg, default="exponential"),
         )
 
 
 class SimulatedAnnealing:
+    """模拟退火执行器：每步全体变异 → Metropolis 接受 → 原地择优。"""
+
     def __init__(self, options: SAOptions) -> None:
         self.options = options
 
@@ -71,7 +77,7 @@ class SimulatedAnnealing:
             current = torch.where(accept, trial_loss, current)
 
             if callbacks:
-                # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
+                # 全部均值堆成一个张量再 tolist：一次 GPU 同步，而非每项一次
                 keys = list(parts)
                 vals = torch.stack([parts[k].detach().mean() for k in keys]).tolist()
                 metrics = dict(zip(keys, vals, strict=True))
@@ -88,3 +94,5 @@ class SimulatedAnnealing:
                 return opts.T0 + (opts.T1 - opts.T0) * progress
             case "logarithmic":
                 return opts.T0 / (1.0 + progress * (opts.T0 / opts.T1 - 1.0))
+            case _:
+                raise ValueError(f"unknown cooling: {opts.cooling!r}")

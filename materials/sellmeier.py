@@ -1,3 +1,9 @@
+"""Sellmeier 色散材料数据库（六系数公式，(nd, vd) 特征空间变异）。
+
+n²(λ) = 1 + Σᵢ Bᵢλ²/(λ² − Cᵢ)，λ 以 μm 计。数据为 Schott 系玻璃目录值；
+编号语义按 d 线折射率升序固定（GA 变异在特征空间中的语义稳定）。
+"""
+
 from typing import ClassVar
 
 import torch
@@ -5,7 +11,7 @@ import torch
 from core import RayFloatScalar, SystemLongScalar, term
 from materials.protocol import MaterialDatabase
 
-# ---- 原始数据 (名称, B1, B2, B3, C1, C2, C3, nd, vd) ----
+# ── 原始数据 (名称, B1, B2, B3, C1, C2, C3, nd, vd) ──
 # fmt: off
 _SELLMEIER_DATA: list[
     tuple[str, float, float, float, float, float, float, float, float]
@@ -126,8 +132,8 @@ _SORTED = sorted(_SELLMEIER_DATA, key=lambda r: r[-2])
 
 _SELLMEIER_NAMES: tuple[str, ...] = tuple(r[0] for r in _SORTED)
 
-# 波长单位换算：λ(μm²) = λ(nm)² × 1e-6（Sellmeier 公式输入为 μm²）。
-_NM_PER_UM2 = 1e-6
+# Sellmeier 公式的 λ 以 μm 计：λ(μm²) = λ(nm)² × 1e-6
+_NM2_TO_UM2: float = 1e-6
 
 
 class SellmeierMaterialDatabase(MaterialDatabase):
@@ -148,9 +154,7 @@ class SellmeierMaterialDatabase(MaterialDatabase):
         vd = torch.tensor([r[8] for r in _SORTED])
         nd_mean, nd_std = nd.mean(), nd.std()
         vd_mean, vd_std = vd.mean(), vd.std()
-        features = torch.stack(
-            ((nd - nd_mean) / nd_std, (vd - vd_mean) / vd_std), dim=-1
-        )
+        features = torch.stack(((nd - nd_mean) / nd_std, (vd - vd_mean) / vd_std), dim=-1)
         self.register_buffer("coeffs", coeffs, persistent=False)
         self.register_buffer("nd", nd, persistent=False)
         self.register_buffer("vd", vd, persistent=False)
@@ -160,18 +164,14 @@ class SellmeierMaterialDatabase(MaterialDatabase):
     def names(self) -> tuple[str, ...]:
         return self._NAMES
 
-    def forward(
-        self, indices: SystemLongScalar, wavelength: RayFloatScalar
-    ) -> RayFloatScalar:
+    def forward(self, indices: SystemLongScalar, wavelength: RayFloatScalar) -> RayFloatScalar:
         coeffs = self.coeffs.index_select(0, indices)
-        coeffs = coeffs.view(
-            indices.shape[0], *([1] * (wavelength.ndim - 1)), 6
-        )  # (P, 1, 1, 1, 6)
+        coeffs = coeffs.view(indices.shape[0], *([1] * (wavelength.ndim - 1)), 6)  # (P, 1, 1, 1, 6)
 
         bc = coeffs[..., :3]  # (P, 1, 1, 1, 3)
         cc = coeffs[..., 3:]  # (P, 1, 1, 1, 3)
 
-        w2 = wavelength.square().mul(_NM_PER_UM2).unsqueeze(-1)
+        w2 = wavelength.square().mul(_NM2_TO_UM2).unsqueeze(-1)
         n2 = bc.mul(w2).div(w2.sub(cc)).sum(dim=-1).add(1)
 
         return n2.sqrt()

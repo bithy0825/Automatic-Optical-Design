@@ -1,0 +1,214 @@
+"""OSLO .len 处方 → 训练配置 TOML。
+
+用法：
+
+    python -m convert.oslo <file.len> [out.toml]
+
+接口与 :mod:`convert.zmx` 一致：成功打印或保存 TOML，过滤则打印
+``SKIP <文件名>: <原因>``、退出码 1。
+
+.len 要点（实测 ZEBASE-OSLO 库）：NXT 分块；RD 为半径（曲率 = 1/RD，缺省 =
+平面）；TH 厚度；AP 半口径；AST 行为光阑；头行 ``LEN NEW "名" <effl> <面数>``
+直取焦距；EBR 入射光束半径定 F 数；UNI 1.0 = cm（×10 转 mm）；GLA 可为
+名字或数值折射率。空-空面三分法与 zmx 同规：平面判光阑（多光阑）、曲面
+删除折并厚度、首段丢弃；前承玻璃的平面是玻璃出射面，保持折射器。
+"""
+
+import math
+import re
+import sys
+from pathlib import Path
+
+from convert import _common as cm
+from convert._common import Skip, Surface
+
+_UNIT_SCALE = 10.0  # UNI 1.0 = cm → mm
+
+# 面块内可识别的关键字；其余一律视为不可表达而过滤
+_KNOWN_SURFACE_KEYS = {
+    "AIR",
+    "GLA",
+    "RD",
+    "TH",
+    "AP",
+    "AST",
+    "CC",
+    "WV",
+    "WV2",
+    "WV3",
+    "WW",
+    "END",
+    "PY",
+}
+
+
+# ── 解析 ──
+
+
+def _parse_block(s: Surface, key: str, tokens: list[str]) -> None:
+    try:
+        match key:
+            case "AIR":
+                s.glass = None
+            case "GLA":
+                name = tokens[1]
+                s.glass = name
+                try:
+                    s.nd = float(name)  # 数值形式：GLA 1.573 1.573 1.573
+                except ValueError:
+                    s.nd = 0.0  # 目录名：折射率待库查（仅 ynu 后备用）
+            case "RD":
+                rd = float(tokens[1])
+                if abs(rd) < 1e-9:
+                    raise Skip("zero radius of curvature")
+                s.curv = 1.0 / (rd * _UNIT_SCALE)
+            case "TH":
+                s.disz = float(tokens[1]) * _UNIT_SCALE
+            case "AP":
+                s.diam = float(tokens[1]) * _UNIT_SCALE
+            case "CC":
+                s.coni = float(tokens[1])  # OSLO 圆锥常数，约定与 zmx CONI 相同
+            case "AST":
+                s.is_stop = True
+    except (IndexError, ValueError):
+        pass
+
+
+def parse_len(
+    path: Path,
+) -> tuple[list[Surface], float | None, float | None, float | None, float | None]:
+    """返回 (光学面列表, 头行 EFFL[mm], EBR[mm], ANG[度], 像面 AP[mm])。"""
+    text = cm.read_text(path)
+    m = re.search(r"^UNI\s+([\d.eE+-]+)", text, re.M)
+    if not m or abs(float(m.group(1)) - 1.0) > 1e-9:
+        raise Skip("unknown unit (UNI != 1.0)")
+    m = re.search(r'^LEN\s+NEW\s+"[^"]*"\s+([\d.eE+-]+)', text, re.M)
+    hdr_effl = float(m.group(1)) * _UNIT_SCALE if m else None
+    m = re.search(r"^EBR\s+([\d.eE+-]+)", text, re.M)
+    ebr = float(m.group(1)) * _UNIT_SCALE if m else None
+    m = re.search(r"^ANG\s+([\d.eE+-]+)", text, re.M)
+    ang = float(m.group(1)) if m else None
+
+    blocks = re.split(r"^NXT\s*$", text, flags=re.M)
+    if len(blocks) < 3:
+        raise Skip("no optical surfaces")
+    image_ap: float | None = None
+
+    surfaces: list[Surface] = []
+    for i, block in enumerate(blocks[1:], start=1):
+        s = Surface(index=i)
+        for line in block.splitlines():
+            if not line.strip():
+                continue
+            tokens = line.split()
+            key = tokens[0].upper()
+            if key == "END":
+                continue
+            if key not in _KNOWN_SURFACE_KEYS:
+                raise Skip(f"unsupported surface data: {key} (block {i})")
+            _parse_block(s, key, tokens)
+        surfaces.append(s)
+
+    # 末块为像面：取其 AP 作 FOV 后备，不进入光学面列表
+    if surfaces:
+        image_ap = surfaces[-1].diam if surfaces[-1].diam > 0 else None
+        optical = surfaces[:-1]
+    else:
+        optical = []
+    if not optical:
+        raise Skip("no optical surfaces")
+    return optical, hdr_effl, ebr, ang, image_ap
+
+
+# ── 推断 ──
+
+
+def _infer_effl(optical: list[Surface], hdr_effl: float | None) -> float:
+    if hdr_effl is not None and 0.1 < hdr_effl < 1e5:
+        return hdr_effl
+    effl = cm.ynu_effl(optical)  # 头行缺失/异常时的后备
+    if effl is None or not 0.1 < effl < 1e5:
+        raise Skip("cannot infer EFFL")
+    return effl
+
+
+def _infer_fnumber(effl: float, ebr: float | None) -> float:
+    if ebr is None or ebr <= 0:
+        raise Skip("cannot infer F-number (no EBR)")
+    f = effl / (2.0 * ebr)
+    if not 0.1 < f < 1e3:
+        raise Skip("cannot infer F-number")
+    return f
+
+
+def _infer_fov(effl: float, ang: float | None, image_ap: float | None) -> float:
+    if ang is not None and ang > 0:
+        # 垃圾视场 spec 不被 auto 兜底掩盖，交给 convert 的 >45° 过滤
+        return ang
+    if image_ap is not None:  # 像面 AP = 像圈半径
+        return math.degrees(math.atan(image_ap / effl))
+    return cm.auto_fov(effl)  # 无视场信息：按焦距自动推断
+
+
+# ── 转换主流程 ──
+
+
+def convert(path: Path) -> str:
+    """将一个 .len 处方转换为训练配置 TOML 文本；不可转换抛 :class:`Skip`。"""
+    optical, hdr_effl, ebr, ang, image_ap = parse_len(path)
+
+    for s in optical:
+        if s.glass and s.glass.upper() == "MIRROR":
+            raise Skip(f"mirror surface (surf {s.index})")
+        if s.glass and s.glass.upper() in cm.NON_GLASS:
+            raise Skip(f"non-glass medium: {s.glass} (surf {s.index})")
+        if s.disz is None:
+            s.disz = 0.0  # .len 中 TH 缺省 = 零厚度（哑面）
+        elif s.disz > 1e6:
+            raise Skip(f"infinite thickness (surf {s.index})")
+        if s.diam <= 0:  # AP 缺失：以 2×入瞳直径兜底全直径，且不越半球域
+            if ebr is None or ebr <= 0:
+                raise Skip(f"missing aperture (surf {s.index})")
+            s.diam = 2.0 * ebr
+            if s.curv != 0.0:
+                cap = math.floor(1.8 / abs(s.curv))  # 0.9×半球域极限（全直径）
+                if math.ceil(2.0 * s.diam) > cap:
+                    s.diam = max(cap, 1) / 2.0
+
+    # 空-空面三分法（与 zmx 同规）：平面留作光阑，曲面删除折并厚度，首段丢弃
+    optical = cm.drop_noop_surfaces(optical)
+    if not optical:
+        raise Skip("no optical surfaces")
+
+    effl = cm.snap_effl(_infer_effl(optical, hdr_effl))
+    fnum = _infer_fnumber(effl, ebr)
+    theta = _infer_fov(effl, ang, image_ap)
+    if theta > 45:
+        raise Skip(f"extreme FOV ({theta:.1f}°)")
+
+    std_scale = cm.fov_std_scale(theta)
+    parts = [cm.header(path.stem, effl, fnum, theta)]
+    # allow_negative 只给链上第一个面（与光源同面，t≈0 的数值噪声/首面负曲率
+    # 的合法负根）；中间面负距离=X 型打架，必须保持判死
+    for i, s in enumerate(optical):
+        prev_air = i == 0 or optical[i - 1].glass is None
+        # 光阑判定（与 zmx 同规）：AST 光阑在空气中不论曲率一律转 stop；
+        # 空-空平面判为光阑（多光阑）；前承玻璃的平面是玻璃出射面，保持折射器
+        stop_plane = s.glass is None and (
+            (s.is_stop and (cm.is_flat(s) or prev_air)) or (prev_air and cm.is_flat(s))
+        )
+        if stop_plane:
+            parts.append(cm.stop_block(s, front=i == 0, std_scale=std_scale))
+        else:
+            parts.append(cm.refractor_block(s, allow_negative=i == 0, std_scale=std_scale))
+        parts.append(cm.gap_block(s, last=i == len(optical) - 1, effl=effl, std_scale=std_scale))
+    parts.append(cm.sensor_block(effl, theta))
+    return "\n\n".join(parts) + "\n"
+
+
+def main(argv: list[str]) -> int:
+    return cm.cli(convert, argv, doc=__doc__ or "")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

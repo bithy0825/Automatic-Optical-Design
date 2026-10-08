@@ -1,3 +1,5 @@
+"""常折射率材料数据库：真空 / 空气 / 水的固定折射率（不随波长变化，无法变异）。"""
+
 from typing import ClassVar
 
 import torch
@@ -5,7 +7,7 @@ import torch
 from core import RayFloatScalar, SystemLongScalar, term
 from materials.protocol import MaterialDatabase
 
-# ---- 原始数据 (名称, 折射率) ----
+# ── 原始数据 (名称, 折射率) ──
 _CONSTANT_DATA: list[tuple[str, float]] = [
     ("vacuum", 1.0),
     ("air", 1.00027),
@@ -14,6 +16,7 @@ _CONSTANT_DATA: list[tuple[str, float]] = [
     ("water80C", 1.31044),
 ]
 
+# 按名称排序，固定编号语义
 _SORTED = sorted(_CONSTANT_DATA, key=lambda r: r[0])
 
 _CONSTANT_NAMES: tuple[str, ...] = tuple(r[0] for r in _SORTED)
@@ -36,9 +39,7 @@ class ConstantMaterialDatabase(MaterialDatabase):
     def names(self) -> tuple[str, ...]:
         return self._NAMES
 
-    def forward(
-        self, indices: SystemLongScalar, wavelength: RayFloatScalar
-    ) -> RayFloatScalar:
+    def forward(self, indices: SystemLongScalar, wavelength: RayFloatScalar) -> RayFloatScalar:
         n = self.n.index_select(0, indices)
         n = n.view(indices.shape[0], *([1] * (wavelength.ndim - 1)))  # (P, 1, 1, 1)
         return n.expand_as(wavelength)

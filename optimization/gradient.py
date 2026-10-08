@@ -1,7 +1,7 @@
-"""梯度下降优化器（Adam / SGD）。
+"""梯度下降优化器（Adam / AdamW / SGD）。
 
-``lr`` 配置键字段经词表名词匹配到 ``named_parameters()`` 的叶子名；
-未命中走 ``default_lr``。不同 lr 值自动分组，调度一致衰减。
+``lr`` 配置键经词表名词匹配到 ``named_parameters()`` 的叶子名；未命中走
+``default_lr``。不同 lr 值自动分组，调度一致衰减。
 """
 
 from collections.abc import Mapping, Sequence
@@ -16,29 +16,37 @@ from optimization.callback import Callback
 from optimization.loss import LossWeights, total_loss
 from optimization.target import Target
 
+type _SchedulerKind = Literal["cosine", "linear", "exponential", "none"]
+
 
 @dataclass(slots=True)
 class AdamOptions:
+    """Adam 优化器选项。"""
+
     step: int = 200
     default_lr: float = 1e-3
-    lr: dict[str, float] = field(default_factory=dict)
+    lr: dict[str, float] = field(default_factory=dict)  # 词表键 → 逐叶学习率
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 0.0
     grad_norm: float | None = 10.0
-    scheduler: Literal["cosine", "linear", "exponential", "none"] = "cosine"
+    scheduler: _SchedulerKind = "cosine"
 
     @classmethod
     def from_options(cls, cfg: Mapping[str, Any] | None = None) -> Self:
+        """从 ``[[optimizer]]`` 配置块构造；``None`` → 全默认。"""
         if cfg is None:
             return cls()
         return cls(
-            step=int(cfg.get("step", 200)),
-            default_lr=float(cfg.get("default_lr", 1e-3)),
-            lr={str(k): float(v) for k, v in cfg.get("lr", {}).items()},
-            betas=cast(tuple[float, float], tuple(cfg.get("betas", (0.9, 0.999)))),
-            weight_decay=float(cfg.get("weight_decay", 0.0)),
-            grad_norm=cfg.get("grad_norm", 10.0),
-            scheduler=cfg.get("scheduler", "cosine"),
+            step=int(term.STEP.resolve(cfg, default=200)),
+            default_lr=float(term.DEFAULT_LR.resolve(cfg, default=1e-3)),
+            lr={str(k): float(v) for k, v in term.LR.resolve(cfg, default={}).items()},
+            betas=cast(
+                tuple[float, float],
+                tuple(term.BETAS.resolve(cfg, default=(0.9, 0.999))),
+            ),
+            weight_decay=float(term.WEIGHT_DECAY.resolve(cfg, default=0.0)),
+            grad_norm=term.GRAD_NORM.resolve(cfg, default=10.0),
+            scheduler=term.SCHEDULER.resolve(cfg, default="cosine"),
         )
 
 
@@ -52,26 +60,29 @@ class AdamWOptions(AdamOptions):
 
 @dataclass(slots=True)
 class SGDOptions:
+    """SGD 优化器选项（动量）。"""
+
     step: int = 200
     default_lr: float = 1e-3
     lr: dict[str, float] = field(default_factory=dict)
     momentum: float = 0.9
     weight_decay: float = 0.0
     grad_norm: float | None = 10.0
-    scheduler: Literal["cosine", "linear", "exponential", "none"] = "cosine"
+    scheduler: _SchedulerKind = "cosine"
 
     @classmethod
     def from_options(cls, cfg: Mapping[str, Any] | None = None) -> Self:
+        """从 ``[[optimizer]]`` 配置块构造；``None`` → 全默认。"""
         if cfg is None:
             return cls()
         return cls(
-            step=int(cfg.get("step", 200)),
-            default_lr=float(cfg.get("default_lr", 1e-3)),
-            lr={str(k): float(v) for k, v in cfg.get("lr", {}).items()},
-            momentum=float(cfg.get("momentum", 0.9)),
-            weight_decay=float(cfg.get("weight_decay", 0.0)),
-            grad_norm=cfg.get("grad_norm", 10.0),
-            scheduler=cfg.get("scheduler", "cosine"),
+            step=int(term.STEP.resolve(cfg, default=200)),
+            default_lr=float(term.DEFAULT_LR.resolve(cfg, default=1e-3)),
+            lr={str(k): float(v) for k, v in term.LR.resolve(cfg, default={}).items()},
+            momentum=float(term.MOMENTUM.resolve(cfg, default=0.9)),
+            weight_decay=float(term.WEIGHT_DECAY.resolve(cfg, default=0.0)),
+            grad_norm=term.GRAD_NORM.resolve(cfg, default=10.0),
+            scheduler=term.SCHEDULER.resolve(cfg, default="cosine"),
         )
 
 
@@ -96,6 +107,13 @@ def _lr_map(lr_config: dict[str, float]) -> dict[str, float]:
 
 
 class GradientOptimizer:
+    """梯度下降执行器：按代重启的优化循环（优化器状态跨代保留）。
+
+    ``run`` 每代重建 lr 调度器；优化器本身惰性创建一次——逐代重启退火时
+    各组 lr 先重置回基准值（余弦/指数按"当前 lr"递推，上一代末尾 lr≈0
+    会把后续所有代锁死在 0）。
+    """
+
     def __init__(self, options: AdamOptions | SGDOptions, *, stage: str = "") -> None:
         self.options = options
         self._stage = stage or (
@@ -106,6 +124,10 @@ class GradientOptimizer:
             else "adam"
         )
         self._opt: torch.optim.Optimizer | None = None
+
+    def reset(self) -> None:
+        """丢弃优化器状态（动量 / 二阶矩），下次 ``run`` 重建——dtype 切换用。"""
+        self._opt = None
 
     def run(
         self,
@@ -134,9 +156,7 @@ class GradientOptimizer:
 
             if isinstance(opts, AdamOptions):
                 torch_cls = (
-                    torch.optim.AdamW
-                    if isinstance(opts, AdamWOptions)
-                    else torch.optim.Adam
+                    torch.optim.AdamW if isinstance(opts, AdamWOptions) else torch.optim.Adam
                 )
                 self._opt = torch_cls(
                     param_groups,
@@ -173,7 +193,7 @@ class GradientOptimizer:
                 scheduler.step()
 
             if callbacks:
-                # 全部均值堆成一个张量再 tolist:一次 GPU 同步,而非每项一次
+                # 全部均值堆成一个张量再 tolist：一次 GPU 同步，而非每项一次
                 keys = list(parts)
                 vals = torch.stack([parts[k].detach().mean() for k in keys]).tolist()
                 metrics = dict(zip(keys, vals, strict=True))
@@ -190,9 +210,7 @@ class GradientOptimizer:
             group["lr"] = base
         match opts.scheduler:
             case "cosine":
-                return torch.optim.lr_scheduler.CosineAnnealingLR(
-                    self._opt, T_max=opts.step
-                )
+                return torch.optim.lr_scheduler.CosineAnnealingLR(self._opt, T_max=opts.step)
             case "linear":
                 return torch.optim.lr_scheduler.LinearLR(
                     self._opt, start_factor=1.0, end_factor=0.01, total_iters=opts.step
@@ -202,4 +220,4 @@ class GradientOptimizer:
                     self._opt, gamma=1e-6 ** (1.0 / opts.step)
                 )
             case _:
-                raise ValueError(f"Unknown scheduler: {opts.scheduler}")
+                raise ValueError(f"unknown scheduler: {opts.scheduler}")

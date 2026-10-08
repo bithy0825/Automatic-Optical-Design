@@ -1,8 +1,23 @@
+"""矢高 → 3D 隐式函数的提升：``f(x, y, z) = s(x, y) − z``。
+
+z 分量只以 ``−z`` 进入，故梯度 z 分量恒为 −1，Hessian 末行/列恒零。
+"""
+
 import torch
 
-from core import RayFloat3D
-from implicit._tensor_utils import _sym3x3_sag_hessian
+from core import RayFloat3D, RayFloatMatrix3D, RayFloatScalar
 from implicit.protocol import FieldResult, ImplicitFunction, SagFunction
+
+
+def _sym3x3_sag_hessian(
+    d00: RayFloatScalar, off01: RayFloatScalar, d11: RayFloatScalar
+) -> RayFloatMatrix3D:
+    """组装 ``[[d00, off01, 0], [off01, d11, 0], [0, 0, 0]]``（lift 结构）。"""
+    zero = torch.zeros_like(d00)
+    row0 = torch.stack((d00, off01, zero), dim=-1)
+    row1 = torch.stack((off01, d11, zero), dim=-1)
+    row2 = torch.stack((zero, zero, zero), dim=-1)
+    return torch.stack((row0, row1, row2), dim=-2)
 
 
 def lift_raw(sag: SagFunction) -> ImplicitFunction:
@@ -12,24 +27,22 @@ def lift_raw(sag: SagFunction) -> ImplicitFunction:
         z = points[..., 2]  # 光轴分量
 
         sr = sag(points[..., :2], order=order)  # 横向 xy → 矢高
-        f_val = sr.value.sub(z)  # f = s(x, y) − z
 
-        verdict = sr.verdict
-
-        f_grad = None
+        grad = None
         if order >= FieldResult.Order.GRADIENT:
-            grad_x, grad_y = sr.gradient.unbind(dim=-1)
-            f_grad = torch.stack((grad_x, grad_y, torch.full_like(z, -1.0)), dim=-1)
+            grad_x, grad_y = sr.grad().unbind(dim=-1)
+            grad = torch.stack((grad_x, grad_y, torch.full_like(z, -1.0)), dim=-1)
 
-        f_hess = None
+        hess = None
         if order >= FieldResult.Order.HESSIAN:
-            g_xx = sr.hessian[..., 0, 0]
-            g_xy = sr.hessian[..., 0, 1]
-            g_yy = sr.hessian[..., 1, 1]
-            f_hess = _sym3x3_sag_hessian(g_xx, g_xy, g_yy)
+            h = sr.hess()
+            hess = _sym3x3_sag_hessian(h[..., 0, 0], h[..., 0, 1], h[..., 1, 1])
 
         return FieldResult(
-            _value=f_val, _verdict=verdict, _gradient=f_grad, _hessian=f_hess
+            value=sr.value.sub(z),  # f = s(x, y) − z
+            verdict=sr.verdict,
+            gradient=grad,
+            hessian=hess,
         )
 
     return lifted

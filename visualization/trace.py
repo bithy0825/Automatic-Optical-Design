@@ -1,99 +1,55 @@
-"""可视化追迹管线:按视图采样参数批量追迹并缓存。
+"""2D 视图追迹：光路图（x-z 截面）与点列图（传感器落点）的数据提取。
 
-两种视图(layout/spot)对全种群一次追迹,打包时按 pop 切片;PSF 的
-Kirchhoff 积分计算量随 P 线性膨胀(E_010 P=256 时中间张量达数 GB),
-改为请求级先切单个体再追迹。
+约定：光路图在 x-z 截面（光轴 +z 向右，横向 x 向上——fov 配置惯例为 x 向
+变化），坐标一律 mm；点列为传感器局部 (x, y)。本层只产出张量数据，
+JSON 打包在 :mod:`visualization.server`。
 """
 
-from __future__ import annotations
-
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from itertools import chain
-from typing import Any, Final
+from typing import Final
 
-import numpy as np
 import torch
 
-from analysis.psf import psf_kirchhoff
-from component import Gap, InfiniteSource, Refractor, Sensor, Sequential, Stop
-from component.protocol import Component
-from core import TraceFlow, Transformer
-from core.sturdy_math import sturdy_div
-from implicit.protocol import FieldResult
-from optimization.loss import LossWeights, total_loss
-from optimization.target import Target
+from component import InfiniteSource, Refractor, Sensor, Sequential, Stop
+from core import TraceFlow, Transformer, sturdy_div
+from implicit import FieldResult
 from sampling import SampleOptions
 from shape import Shape
-from visualization.protocol import pack
 
 N_PROFILE_PTS: Final = 200
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 数据结构
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 @dataclass(slots=True)
 class LayoutData:
-    """全种群布局数据(缓存单元,已 numpy 化)。"""
+    """光路图全种群数据（torch，未切片）。"""
 
-    labels: list[str]  # 面标签 ["S1", ..., "Sensor"],长度 S
-    kinds: list[str]  # 面种类 ["Sphere", ..., "sensor"]
-    regions: list[list[str]]  # (S+1) × (P,):regions[j] = 面 j-1 下游介质名
-    profiles: np.ndarray  # (P, S, N_PROFILE_PTS, 2) f32,(x, z) 全局,域外 NaN
-    rims: np.ndarray  # (P, S, 2, 2) f32,[下边缘, 上边缘]
-    paths: np.ndarray  # (P, F, W, N, S+1, 3) f32,第 0 步为发射面
-    holds: np.ndarray  # (P, F, W, N, S+1) u8
-    effl: np.ndarray  # (P,) f32,存活光线最小二乘估计焦距(同 effl_loss)
-    fields_deg: np.ndarray  # (F, 2) f32
-    wavelengths_nm: np.ndarray  # (W,) f32
-
-    @property
-    def population(self) -> int:
-        return int(self.paths.shape[0])
+    labels: list[str]  # 面标签 ["S1", ..., "Sensor"]，长度 S
+    kinds: list[str]  # 面种类 ["sphere", ..., "sensor"]
+    regions: list[list[str]]  # (S+1) × (P,)：regions[j] = 面 j-1 下游介质名
+    profiles: torch.Tensor  # (P, S, N_PROFILE_PTS, 2)，(x, z) 全局，域外 NaN
+    rims: torch.Tensor  # (P, S, 2, 2)，[下边缘, 上边缘]
+    paths: torch.Tensor  # (P, F, W, N, S+1, 2)，(x, z)；第 0 步为发射面
+    holds: torch.Tensor  # (P, F, W, N, S+1) bool
+    effl: torch.Tensor  # (P,) 存活光线最小二乘估计焦距
+    fields_deg: torch.Tensor  # (F, 2)
+    wavelengths_nm: torch.Tensor  # (W,)
 
 
 @dataclass(slots=True)
 class SpotData:
-    """全种群点列数据(缓存单元,已 numpy 化)。"""
+    """点列图全种群数据（torch，未切片）。"""
 
-    spots: np.ndarray  # (P, F, W, N, 2) f32,传感器局部 xy;N 第 0 点为主光线
-    holds: np.ndarray  # (P, F, W, N) u8
-    fields_deg: np.ndarray  # (F, 2) f32
-    wavelengths_nm: np.ndarray  # (W,) f32
-
-    @property
-    def population(self) -> int:
-        return int(self.spots.shape[0])
+    spots: torch.Tensor  # (P, F, W, N, 2) 传感器局部 xy；N 第 0 点为主光线
+    holds: torch.Tensor  # (P, F, W, N) bool
+    fields_deg: torch.Tensor  # (F, 2)
+    wavelengths_nm: torch.Tensor  # (W,)
 
 
-@dataclass(slots=True)
-class PsfData:
-    """单个体 PSF 数据(缓存单元,已 numpy 化;P 恒为 1,见 _slice_pop)。"""
-
-    psf: np.ndarray  # (P, F, W, H, H) f32,每张 Σ=1
-    centers: np.ndarray  # (P, F, W, 2) f32,传感器局部 xy mm
-    na: np.ndarray  # (P, F, W) f32
-    delta: float  # mm/px
-    fields_deg: np.ndarray  # (F, 2) f32
-    wavelengths_nm: np.ndarray  # (W,) f32
-    warnings: list[str]
-
-    @property
-    def population(self) -> int:
-        return int(self.psf.shape[0])
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 构建与追迹
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _viz_seq(seq: Sequential, pupil_cfg: SampleOptions) -> Sequential:
-    """以 *pupil_cfg* 替换光源光瞳采样,克隆整条链(不碰原系统)。"""
-    src: InfiniteSource = seq[0]
+def viz_clone(seq: Sequential, pupil_cfg: SampleOptions) -> Sequential:
+    """以 *pupil_cfg* 替换光源光瞳采样，克隆整条链（不碰原系统）。"""
+    src = seq[0]
+    if not isinstance(src, InfiniteSource):
+        raise TypeError(f"first component must be an InfiniteSource, got {type(src).__name__}")
     viz_src = InfiniteSource(
         epd=src.epd,
         field_x=src.field_x,
@@ -110,22 +66,18 @@ def _viz_seq(seq: Sequential, pupil_cfg: SampleOptions) -> Sequential:
     return viz
 
 
-def _profiles(
-    shape: Shape, transformer: Transformer
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """逐种群面的 xz 截面 profile 与边缘点。
+def _profiles(shape: Shape, transformer: Transformer) -> tuple[torch.Tensor, torch.Tensor]:
+    """逐种群面的 x-z 截面 profile 与边缘点。
 
     Returns:
-        prof: (P, N_PROFILE_PTS, 2) — (x, z) 全局坐标,域外 NaN。
-        rims: (P, 2, 2) — [下边缘点, 上边缘点](首/尾有效采样点)。
+        prof: ``(P, N_PROFILE_PTS, 2)`` —— (x, z) 全局坐标，域外 NaN。
+        rims: ``(P, 2, 2)`` —— [下边缘点, 上边缘点]（首/尾有效采样点）。
     """
     D = shape.Diameter  # (P,)
     P, device, dtype = D.shape[0], D.device, D.dtype
     u = torch.linspace(-0.5, 0.5, N_PROFILE_PTS, device=device, dtype=dtype)
     xs = u.unsqueeze(0) * D.unsqueeze(1)  # (P, NP)
-    pts2d = torch.stack((xs, torch.zeros_like(xs)), dim=-1).view(
-        P, 1, 1, N_PROFILE_PTS, 2
-    )
+    pts2d = torch.stack((xs, torch.zeros_like(xs)), dim=-1).view(P, 1, 1, N_PROFILE_PTS, 2)
     res = shape.sag()(pts2d, order=FieldResult.Order.VALUE)
     z = res.value[:, 0, 0]  # (P, NP)
     ok = res.verdict.hold[:, 0, 0]  # (P, NP)
@@ -142,13 +94,11 @@ def _profiles(
 
 
 def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
-    """全种群布局追迹:扇形光瞳 (n_rays, 1),记录逐面交点、profile、材料链。"""
+    """全种群光路图追迹：扇形光瞳 (n_rays, 1)，记录逐面交点、profile、材料链。"""
     if n_rays < 2:
         raise ValueError(f"n_rays must be >= 2, got {n_rays}")
     P = seq[0].population
-    viz = _viz_seq(
-        seq, SampleOptions(method="uniform", region="rect", count=(n_rays, 1))
-    )
+    viz = viz_clone(seq, SampleOptions(method="uniform", region="rect", count=(n_rays, 1)))
 
     step_pts: list[torch.Tensor] = []
     step_hold: list[torch.Tensor] = []
@@ -158,7 +108,7 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
     kinds: list[str] = []
     regions: list[list[str]] = [seq[0].transmitted.names()]
 
-    def _cb(comp: Component, flow: TraceFlow, _i: int) -> TraceFlow:
+    def _cb(comp, flow: TraceFlow, _i: int) -> TraceFlow:
         if isinstance(comp, (InfiniteSource, Refractor, Stop, Sensor)):
             step_pts.append(flow.rays.points.detach())
             step_hold.append(flow.verdict.hold.detach())
@@ -173,27 +123,18 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
             elif isinstance(comp, Stop):
                 labels.append("Stop")
                 kinds.append("stop")
-                regions.append(regions[-1])  # 光阑不改介质:下游 = 上游
+                regions.append(regions[-1])  # 光阑不改介质：下游 = 上游
             else:
                 labels.append("Sensor")
                 kinds.append("sensor")
                 regions.append([""] * P)
         return flow
 
-    # 光源的初始位姿按进程缺省 dtype 创建,追迹期间临时切到链 dtype(退出还原)
-    prev_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(viz.dtype)
-    try:
-        with torch.no_grad():
-            flow = viz.forward(callback=_cb)
-    finally:
-        torch.set_default_dtype(prev_dtype)
+    flow = _trace_no_grad(viz, _cb)
 
-    paths = torch.stack(step_pts, dim=-2).cpu().numpy().astype(np.float32)
-    holds = torch.stack(step_hold, dim=-1).cpu().numpy().astype(np.uint8)
-    profs = torch.stack(profiles, dim=1).cpu().numpy().astype(np.float32)
-    rim = torch.stack(rims, dim=1).cpu().numpy().astype(np.float32)
-    # EFFL:存活光线"像高 ~ 视场角正切"的最小二乘斜率(与 effl_loss 同一估计量)
+    paths = torch.stack(step_pts, dim=-2)[..., [0, 2]]  # (P,F,W,N,S+1,2) 取 (x,z)
+    holds = torch.stack(step_hold, dim=-1)
+    # EFFL：存活光线"像高 ~ 视场角正切"的最小二乘斜率（与 effl_loss 同一估计量）
     t = flow.rays.field.tan()
     h = flow.rays.points[..., :2]
     w = flow.verdict.hold.unsqueeze(-1)
@@ -201,288 +142,77 @@ def trace_layout(seq: Sequential, n_rays: int) -> LayoutData:
         w.mul(h).mul(t).sum(dim=(1, 2, 3, 4)),
         w.mul(t.square()).sum(dim=(1, 2, 3, 4)),
     )
-    effl_np = effl.cpu().numpy().astype(np.float32)
-    fields_deg = (
-        torch.rad2deg(flow.rays.field[0, :, 0, 0, :]).cpu().numpy().astype(np.float32)
-    )
-    wls = flow.rays.wavelength[0, 0, :, 0].cpu().numpy().astype(np.float32)
     return LayoutData(
         labels=labels,
         kinds=kinds,
         regions=regions,
-        profiles=profs,
-        rims=rim,
+        profiles=torch.stack(profiles, dim=1),
+        rims=torch.stack(rims, dim=1),
         paths=paths,
         holds=holds,
-        effl=effl_np,
-        fields_deg=fields_deg,
-        wavelengths_nm=wls,
+        effl=effl,
+        fields_deg=torch.rad2deg(flow.rays.field[0, :, 0, 0, :]),
+        wavelengths_nm=flow.rays.wavelength[0, 0, :, 0],
     )
-
-
-def probe_illumination(seq: Sequential) -> tuple[np.ndarray, np.ndarray]:
-    """光源单发探针:返回 (fields_deg (F,2) f32, wavelengths_nm (W,) f32)。"""
-    with torch.no_grad():
-        flow = seq[0].forward()
-    fields = (
-        torch.rad2deg(flow.rays.field[0, :, 0, 0, :]).cpu().numpy().astype(np.float32)
-    )
-    wls = flow.rays.wavelength[0, 0, :, 0].cpu().numpy().astype(np.float32)
-    return fields, wls
 
 
 def trace_spot(seq: Sequential, density: int, sampling: str = "uniform") -> SpotData:
-    """全种群点列追迹:disk 光瞳,采样第 0 点 = 光瞳中心(主光线)。
+    """全种群点列追迹：disk 光瞳，采样第 0 点 = 光瞳中心（主光线）。
 
     Args:
         seq: 光学系统。
-        density: 密度档位。uniform → disk (density, 2*density);
-            fibonacci → 等点数 disk(N = 2·d² − 2·d + 1,两种采样点数一致)。
-        sampling: ``"uniform"``(同心环)或 ``"fibonacci"``(黄金角螺旋)。
+        density: 密度档位。uniform → disk ``(density, 2·density)``；
+            fibonacci → 等点数 disk（N = 2·d² − 2·d + 1，两种采样点数一致）。
+        sampling: ``"uniform"``（同心环）或 ``"fibonacci"``（黄金角螺旋）。
     """
     if density < 2:
         raise ValueError(f"density must be >= 2, got {density}")
     if sampling == "uniform":
-        pupil = SampleOptions(
-            method="uniform", region="disk", count=(density, 2 * density)
-        )
+        pupil = SampleOptions(method="uniform", region="disk", count=(density, 2 * density))
     elif sampling == "fibonacci":
         pupil = SampleOptions(
-            method="fibonacci",
-            region="disk",
-            count=2 * density * density - 2 * density + 1,
+            method="fibonacci", region="disk", count=2 * density * density - 2 * density + 1
         )
     else:
         raise ValueError(f"unknown sampling {sampling!r}")
-    viz = _viz_seq(seq, pupil)
+    viz = viz_clone(seq, pupil)
 
     captured: dict[str, torch.Tensor] = {}
 
-    def _cb(comp: Component, flow: TraceFlow, _i: int) -> TraceFlow:
+    def _cb(comp, flow: TraceFlow, _i: int) -> TraceFlow:
         if isinstance(comp, Sensor):
             local = flow.transformer.transform_points(flow.rays.points, inverse=True)
             captured["spots"] = local[..., :2].detach()
         return flow
 
-    # 光源的初始位姿按进程缺省 dtype 创建,追迹期间临时切到链 dtype(退出还原)
+    flow = _trace_no_grad(viz, _cb)
+    if "spots" not in captured:
+        raise RuntimeError("no Sensor in the system")
+
+    return SpotData(
+        spots=captured["spots"],
+        holds=flow.verdict.hold.detach(),
+        fields_deg=torch.rad2deg(flow.rays.field[0, :, 0, 0, :]),
+        wavelengths_nm=flow.rays.wavelength[0, 0, :, 0],
+    )
+
+
+def probe_illumination(seq: Sequential) -> tuple[torch.Tensor, torch.Tensor]:
+    """光源单发探针：返回 (fields_deg ``(F,2)``, wavelengths_nm ``(W,)``)。"""
+    with torch.no_grad():
+        flow = seq[0].forward()
+    return (
+        torch.rad2deg(flow.rays.field[0, :, 0, 0, :]),
+        flow.rays.wavelength[0, 0, :, 0],
+    )
+
+
+def _trace_no_grad(viz: Sequential, cb) -> TraceFlow:
+    """无梯度追迹；光源初始位姿按进程缺省 dtype 创建，期间临时切到链 dtype。"""
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(viz.dtype)
     try:
         with torch.no_grad():
-            flow = viz.forward(callback=_cb)
+            return viz(callback=cb)
     finally:
         torch.set_default_dtype(prev_dtype)
-    if "spots" not in captured:
-        raise RuntimeError("trace_spot: 系统中没有 Sensor 元件")
-
-    spots = captured["spots"].cpu().numpy().astype(np.float32)
-    holds = flow.verdict.hold.detach().cpu().numpy().astype(np.uint8)
-    fields_deg = (
-        torch.rad2deg(flow.rays.field[0, :, 0, 0, :]).cpu().numpy().astype(np.float32)
-    )
-    wls = flow.rays.wavelength[0, 0, :, 0].cpu().numpy().astype(np.float32)
-    return SpotData(spots=spots, holds=holds, fields_deg=fields_deg, wavelengths_nm=wls)
-
-
-def trace_psf(
-    seq: Sequential,
-    density: int,
-    size: int,
-    delta: float | None = None,
-    sampling: str = "fibonacci",
-) -> PsfData:
-    """全种群 PSF:disk 光瞳(点数口径与 trace_spot 一致),Kirchhoff 积分。
-
-    Args:
-        density: 密度档位。uniform → disk (density, 2·density);
-            fibonacci → 等点数 disk(N = 2·d² − 2·d + 1)。
-        size:    PSF 网格边长 H(H×H)。
-        delta:   像面采样间隔 mm/px;None → 自动 λ_min/(4·NA)。
-        sampling: ``"uniform"`` 或 ``"fibonacci"``。
-    """
-    if density < 4:
-        raise ValueError(f"density must be >= 4, got {density}")
-    if sampling == "uniform":
-        pupil = SampleOptions(
-            method="uniform", region="disk", count=(density, 2 * density)
-        )
-    elif sampling == "fibonacci":
-        pupil = SampleOptions(
-            method="fibonacci",
-            region="disk",
-            count=2 * density * density - 2 * density + 1,
-        )
-    else:
-        raise ValueError(f"unknown sampling {sampling!r}")
-    res = psf_kirchhoff(seq, size, delta, pupil=pupil)
-    fields_deg, wls = probe_illumination(seq)
-    return PsfData(
-        psf=res.psf.cpu().numpy().astype(np.float32),
-        centers=res.centers.cpu().numpy().astype(np.float32),
-        na=res.na.cpu().numpy().astype(np.float32),
-        delta=res.delta,
-        fields_deg=fields_deg,
-        wavelengths_nm=wls,
-        warnings=res.warnings,
-    )
-
-
-class PopOutOfRange(IndexError):
-    """pop 越界(服务端映射为 400)。"""
-
-
-def _check_pop(pop: int, population: int) -> None:
-    if not 0 <= pop < population:
-        raise PopOutOfRange(f"pop {pop} out of range [0, {population})")
-
-
-def _slice_pop(seq: Sequential, pop: int) -> Sequential:
-    """切出第 *pop* 个个体(种群维 P→1),与原体断开。
-
-    克隆后逐参数/buffer 把批量维切为单行;材料经索引引用单例库,切片
-    不碰索引值,与 ``where_`` 同一约定。逐 pop 计算 PSF 的前置步骤。
-    """
-    one = seq.clone()
-    P = seq.population
-    with torch.no_grad():
-        for t in chain(one.parameters(), one.buffers()):
-            if t.shape[0] == P:
-                t.data = t.data[pop : pop + 1].contiguous()
-    return one
-
-
-class TraceCache:
-    """按视图参数缓存追迹结果。
-
-    layout/spot 全种群一次追迹、打包时按 pop 切片;PSF 改为请求级
-    单个体追迹(见模块 docstring),按 (pop, 视图参数) 缓存。
-
-    *target*/*blocks*/*weights* 给出时,另缓存一次原始采样口径的
-    ``total_loss`` 逐分项结果(与训练口径一致),供 layout_packet 携带。
-    """
-
-    def __init__(
-        self,
-        seq: Sequential,
-        target: Target | None = None,
-        blocks: Sequence[Mapping[str, Any]] | None = None,
-        weights: LossWeights | None = None,
-    ) -> None:
-        self._seq = seq
-        self._target = target
-        self._blocks = blocks
-        self._weights = weights
-        self._losses: dict[str, np.ndarray] | None = None
-        self._layout: dict[int, LayoutData] = {}
-        self._spot: dict[tuple[int, str], SpotData] = {}
-        self._psf: dict[tuple, PsfData] = {}
-        # 系统总长:首个折射面顶点 → 传感器,即其后的全部 gap 厚度之和(逐 pop)
-        P = seq.population
-        total = torch.zeros(P, device=seq.device, dtype=seq.dtype)
-        seen_refractor = False
-        for comp in seq:
-            if isinstance(comp, Refractor):
-                seen_refractor = True
-            elif isinstance(comp, Gap) and seen_refractor:
-                total = total.add(comp.Thickness.detach().view(P, -1).sum(dim=1))
-        self._total_length = total.cpu().numpy().astype(np.float32)
-
-    def _eval_losses(self) -> dict[str, np.ndarray] | None:
-        """惰性计算逐分项损失(原始光源采样,一次性缓存)。"""
-        if (
-            self._losses is None
-            and self._blocks is not None
-            and self._target is not None
-        ):
-            # 同 trace_layout:追迹期间把进程缺省 dtype 钉到链 dtype
-            prev_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(self._seq.dtype)
-            try:
-                with torch.no_grad():
-                    flow = self._seq()
-                    total, parts = total_loss(
-                        flow, self._seq, self._target, self._blocks, self._weights
-                    )
-            finally:
-                torch.set_default_dtype(prev_dtype)
-            self._losses = {
-                k: v.cpu().numpy().astype(np.float32) for k, v in parts.items()
-            }
-            self._losses["total"] = total.cpu().numpy().astype(np.float32)
-        return self._losses
-
-    def layout(self, n_rays: int) -> LayoutData:
-        if n_rays not in self._layout:
-            self._layout[n_rays] = trace_layout(self._seq, n_rays)
-        return self._layout[n_rays]
-
-    def spot(self, density: int, sampling: str = "uniform") -> SpotData:
-        key = (density, sampling)
-        if key not in self._spot:
-            self._spot[key] = trace_spot(self._seq, density, sampling)
-        return self._spot[key]
-
-    def layout_packet(self, pop: int, n_rays: int) -> bytes:
-        data = self.layout(n_rays)
-        _check_pop(pop, data.population)
-        meta: dict[str, Any] = {
-            "labels": data.labels,
-            "kinds": data.kinds,
-            "regions": [r[pop] for r in data.regions],
-            "effl": float(data.effl[pop]),
-            "total_length": float(self._total_length[pop]),
-            "fields_deg": data.fields_deg.tolist(),
-            "wavelengths_nm": data.wavelengths_nm.tolist(),
-        }
-        losses = self._eval_losses()
-        if losses is not None:
-            meta["losses"] = {k: float(v[pop]) for k, v in losses.items()}
-        return pack(
-            meta,
-            {
-                "profiles": data.profiles[pop],
-                "rims": data.rims[pop],
-                "paths": data.paths[pop],
-                "holds": data.holds[pop],
-            },
-        )
-
-    def spot_packet(self, pop: int, density: int, sampling: str = "uniform") -> bytes:
-        data = self.spot(density, sampling)
-        _check_pop(pop, data.population)
-        meta = {
-            "chief_index": 0,
-            "fields_deg": data.fields_deg.tolist(),
-            "wavelengths_nm": data.wavelengths_nm.tolist(),
-        }
-        return pack(meta, {"spots": data.spots[pop], "holds": data.holds[pop]})
-
-    def psf(
-        self, pop: int, density: int, sampling: str, size: int, delta: float | None
-    ) -> PsfData:
-        _check_pop(pop, self._seq.population)
-        key = (pop, density, sampling, size, delta)
-        if key not in self._psf:
-            self._psf[key] = trace_psf(
-                _slice_pop(self._seq, pop), density, size, delta, sampling
-            )
-        return self._psf[key]
-
-    def psf_packet(
-        self, pop: int, density: int, sampling: str, size: int, delta: float | None
-    ) -> bytes:
-        data = self.psf(pop, density, sampling, size, delta)
-        meta = {
-            "delta": data.delta,
-            "fields_deg": data.fields_deg.tolist(),
-            "wavelengths_nm": data.wavelengths_nm.tolist(),
-            "warnings": data.warnings,
-        }
-        return pack(
-            meta,
-            {
-                "psf": data.psf[0],
-                "centers": data.centers[0],
-                "na": data.na[0],
-            },
-        )

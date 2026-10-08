@@ -1,7 +1,10 @@
-from typing import Any, Self, override
+"""折射器：一个 Shape + 两侧材料，执行求交与 Snell 折射。"""
+
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
+from typing import Any, Self, override
 
+from component.protocol import Component
 from core import (
     OpticalModule,
     SystemBoolScalar,
@@ -10,7 +13,6 @@ from core import (
     fmt_param,
     term,
 )
-from component.protocol import Component
 from materials import Material, MaterialRef
 from physics import refract
 from shape import Shape
@@ -39,16 +41,12 @@ class Refractor(Component):
 
     @override
     def _params(self) -> Iterator[str]:
-        incident = (
-            fmt_param(self.incident.names())
-            if self.incident is not None
-            else "(unbound)"
-        )
+        incident = fmt_param(self.incident.names()) if self.incident is not None else "(unbound)"
         yield f"incident: {incident}"
         yield f"transmitted: {fmt_param(self.transmitted.names())}"
 
     def bind_incident(self, transmitted_prev: Material) -> None:
-        """绑定上游入射材料（可选，若不绑定则折射器无法工作）。"""
+        """绑定上游入射材料（由链式容器在重构链时调用）。"""
         self.incident = MaterialRef.from_material(transmitted_prev)
 
     @override
@@ -57,7 +55,7 @@ class Refractor(Component):
         if self.incident is None:
             raise RuntimeError(
                 f"{type(self).__name__}.incident is None; bind it to an upstream "
-                "transmitted material before tracing."
+                "transmitted material before tracing"
             )
 
         hit = self.shape(flow.rays.points, flow.rays.directions, flow.transformer)

@@ -1,20 +1,12 @@
-from typing import Any, Self, override
+"""平面（无限薄孔径光阑 / 像面）。"""
+
 from collections.abc import Mapping
+from typing import Any, Self, override
 
 import torch
 
-from core import (
-    OpticalModule,
-    SystemBoolScalar,
-    SystemFloatScalar,
-    term,
-    parse_param,
-)
-from implicit import (
-    NewtonSolverOptions,
-    SagFunction,
-    flat_sag,
-)
+from core import OpticalModule, SystemBoolScalar, SystemFloatScalar, parse_param, term
+from implicit import NewtonSolverOptions, SagFunction, flat_sag
 from shape.protocol import Shape
 
 

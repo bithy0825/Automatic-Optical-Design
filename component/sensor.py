@@ -1,18 +1,20 @@
-from typing import Any, Self, override
+"""像面传感器：终端元件，光线落面止步（不折射、方向不变）。"""
+
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Any, Self, override
 
-from core import OpticalModule, SystemBoolScalar, TraceFlow, term
 from component.protocol import Component
+from core import OpticalModule, SystemBoolScalar, TraceFlow, term
 from shape import Shape
 
 
 class Sensor(Component):
-    """像面传感器：终端元件（一个 Shape，通常平面 Disk），光线求交后落在面上止步。
+    """像面传感器：终端元件（一个 Shape，通常平面 Disk）。
 
-    方向保持不变（传感器不改变传播，只记录落点）；
-    孔径外的光线由机械孔径裁决判死。无可变异参数
-    （``mutable`` 为空，GA 操作对直径的重排/填充由默认实现完成）。
+    方向保持不变（传感器不改变传播，只记录落点）；孔径外的光线由机械
+    孔径裁决判死。无可变异参数（``mutable`` 为空，GA 操作对直径的
+    重排/填充由默认实现完成）。
 
     Args:
         shape: 传感面面形。

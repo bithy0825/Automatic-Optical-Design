@@ -1,6 +1,8 @@
+"""优化目标规格：一个设计任务的标称参数（视场 / F 数 / 焦距 / 波长）。"""
+
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
-from collections.abc import Mapping
 
 from core import term
 from core.repr import render_line, styled
@@ -9,6 +11,7 @@ type FOV = float | tuple[float, float] | tuple[tuple[float, float], tuple[float,
 
 
 def _parse_fov(raw: Any) -> FOV:
+    """``fov`` 配置值 → 规范化 FOV（全视场角 / 逐轴角 / 逐轴范围）。"""
     match raw:
         case int() | float():
             return float(raw)
@@ -17,10 +20,11 @@ def _parse_fov(raw: Any) -> FOV:
         case [[a, b], [c, d]] | ((a, b), (c, d)):
             return ((float(a), float(b)), (float(c), float(d)))
         case _:
-            raise TypeError(f"Invalid fov: {raw!r}")
+            raise TypeError(f"invalid fov: {raw!r}")
 
 
 def _serialize_fov(fov: FOV) -> float | list[float] | list[list[float]]:
+    """规范化 FOV → TOML 可写形式（``to_dict`` 用）。"""
     match fov:
         case float():
             return fov
@@ -33,6 +37,7 @@ def _serialize_fov(fov: FOV) -> float | list[float] | list[list[float]]:
 
 
 def _fov_name(fov: FOV) -> str:
+    """FOV → 紧凑文本（自动命名用）。"""
     match fov:
         case float() as f:
             return f"{f:g}"
@@ -47,8 +52,10 @@ def _fov_name(fov: FOV) -> str:
             raise RuntimeError(f"unreachable: {fov!r}")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class Target:
+    """设计目标：一个优化任务瞄准的标称参数组合。"""
+
     id: str
     fov: FOV
     F: float
@@ -57,21 +64,20 @@ class Target:
 
     @classmethod
     def from_options(cls, options: Mapping[str, float]) -> Self:
+        """从 ``[target]`` 配置节构造；``id`` 缺省时按参数自动命名。"""
         fov = _parse_fov(term.FOV.resolve(options))
         F = float(term.F_NUMBER.resolve(options))
         effl = float(term.EFFL.resolve(options))
 
-        wavelengths = [
-            float(w) for w in term.WAVELENGTH.resolve(options, default=[550.0])
-        ]
+        wavelengths = [float(w) for w in term.WAVELENGTH.resolve(options, default=[550.0])]
 
-        id = term.ID.resolve(
+        ident = term.ID.resolve(
             options,
             default=f"fov_{_fov_name(fov)}_F_{F:g}_effl_{effl:g}",
         )
 
         return cls(
-            id=id,
+            id=ident,
             fov=fov,
             F=F,
             effl=effl,
@@ -79,18 +85,19 @@ class Target:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            str(term.ID.canonical): self.id,
-            str(term.FOV.canonical): _serialize_fov(self.fov),
-            str(term.F_NUMBER.canonical): self.F,
-            str(term.EFFL.canonical): self.effl,
-            str(term.EPD.canonical): self.epd,
-            str(term.WAVELENGTH.canonical): self.wavelengths,
+        """序列化为配置映射（词表规范键；并入 source 元件块用）。"""
+        return {
+            term.ID.canonical: self.id,
+            term.FOV.canonical: _serialize_fov(self.fov),
+            term.F_NUMBER.canonical: self.F,
+            term.EFFL.canonical: self.effl,
+            term.EPD.canonical: self.epd,
+            term.WAVELENGTH.canonical: self.wavelengths,
         }
-        return d
 
     @property
     def epd(self) -> float:
+        """入瞳直径 (mm)：`EPD = EFFL / F`。"""
         return self.effl / self.F
 
     def __repr__(self) -> str:

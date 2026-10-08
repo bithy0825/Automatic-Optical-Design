@@ -1,16 +1,19 @@
-from typing import override, Self, Any
+"""无限远物方光源：平行光入射 z=0 入瞳平面。"""
+
 from collections.abc import Iterator, Mapping
+from typing import Any, Self, override
 
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float
 
+from component.protocol import Component
 from core import (
     OpticalModule,
+    RayBundle,
     RayFloat2D,
     RayFloat3D,
     RayFloatScalar,
-    RayBundle,
     SystemBoolScalar,
     TraceFlow,
     Transformer,
@@ -18,7 +21,6 @@ from core import (
     fmt_param,
     term,
 )
-from component.protocol import Component
 from core.repr import styled
 from materials import Material
 from sampling import SampleOptions, sample
@@ -43,16 +45,14 @@ def _direction_from_angles(
         (
             tx.sin().mul(cy),  # Vx
             cx.mul(ty.sin()),  # Vy
-            vz,
-        ),  # Vz
+            vz,  # Vz
+        ),
         dim=-1,
     )
     return F.normalize(d, dim=-1)
 
 
-def _denorm(
-    s: Float[torch.Tensor, "F"], rng: tuple[float, float]
-) -> Float[torch.Tensor, "F"]:
+def _denorm(s: Float[torch.Tensor, "F"], rng: tuple[float, float]) -> Float[torch.Tensor, "F"]:
     """[-1, 1] 归一化采样 → [lo, hi] 仿射映射。"""
     lo, hi = rng
     return s.add(1.0).mul(0.5 * (hi - lo)).add(lo)
@@ -79,9 +79,7 @@ def _interp_wavelength(
     return torch.lerp(ctrl[i0], ctrl[i0 + 1], pos - i0)
 
 
-def _normalize_angle_range(
-    val: float | tuple[float, float], *, name: str
-) -> tuple[float, float]:
+def _normalize_angle_range(val: float | tuple[float, float], *, name: str) -> tuple[float, float]:
     """单值或 (min, max) → (min, max)，校验顺序与 ±90° 物理边界。"""
     match val:
         case int() | float():
@@ -95,8 +93,7 @@ def _normalize_angle_range(
         raise ValueError(f"{name} range inverted: ({lo}, {hi})")
     if max(abs(lo), abs(hi)) > _MAX_FIELD_DEG:
         raise ValueError(
-            f"{name} must lie within ±{_MAX_FIELD_DEG}° (rays travel +z), "
-            f"got ({lo}, {hi})"
+            f"{name} must lie within ±{_MAX_FIELD_DEG}° (rays travel +z), got ({lo}, {hi})"
         )
     return (lo, hi)
 
@@ -124,9 +121,7 @@ def _validate_configs(
     """校验采样配置与光源语义的兼容性。"""
     for name, cfg in (("pupil_cfg", pupil_cfg), ("field_cfg", field_cfg)):
         if cfg.region == "line":
-            raise ValueError(
-                f"{name}.region must be 'rect' or 'disk', got {cfg.region!r}"
-            )
+            raise ValueError(f"{name}.region must be 'rect' or 'disk', got {cfg.region!r}")
     if wavel_cfg.region != "line":
         raise ValueError(f"wavel_cfg.region must be 'line', got {wavel_cfg.region!r}")
 
@@ -210,9 +205,7 @@ class InfiniteSource(Component):
         tf = (
             flow.transformer
             if flow is not None
-            else Transformer.identity(
-                self.population, device=self.device, dtype=self.dtype
-            )
+            else Transformer.identity(self.population, device=self.device, dtype=self.dtype)
         )
 
         P, V, pupil, field, wavelength = self._emit_rays(
@@ -222,9 +215,7 @@ class InfiniteSource(Component):
             sample(self.wavel_cfg).to(device=tf.device, dtype=tf.dtype),
         )
 
-        rays = RayBundle(
-            points=P, directions=V, pupil=pupil, field=field, wavelength=wavelength
-        )
+        rays = RayBundle(points=P, directions=V, pupil=pupil, field=field, wavelength=wavelength)
         verdict = Verdict.alive_like(P[..., 0])
 
         if flow is None:
@@ -259,7 +250,7 @@ class InfiniteSource(Component):
         wavel_pts: Float[torch.Tensor, "W"],
     ) -> tuple[RayFloat3D, RayFloat3D, RayFloat2D, RayFloat2D, RayFloatScalar]:
         """归一化采样点 → 物理光线 (P, V) 与逐光线标签 (pupil, field, wavelength)。"""
-        B, f, w, n = (
+        n_pop, f, w, n = (
             tf.population,
             field_pts.shape[0],
             wavel_pts.shape[0],
@@ -281,12 +272,12 @@ class InfiniteSource(Component):
         P = torch.cat((pupil, pupil.new_zeros(n, 1)), dim=-1)  # (N, 3) z=0 入瞳平面
         V = _direction_from_angles(field)  # (F, 3)
 
-        P = tf.transform_points(P.view(1, 1, 1, n, 3).expand(B, f, w, n, 3))
-        V = tf.transform_vectors(V.view(1, f, 1, 1, 3).expand(B, f, w, n, 3))
+        P = tf.transform_points(P.view(1, 1, 1, n, 3).expand(n_pop, f, w, n, 3))
+        V = tf.transform_vectors(V.view(1, f, 1, 1, 3).expand(n_pop, f, w, n, 3))
 
-        pupil_out = pupil.view(1, 1, 1, n, 2).expand(B, f, w, n, 2)
-        field_out = field.view(1, f, 1, 1, 2).expand(B, f, w, n, 2)
-        wavelength_out = wavelength.view(1, 1, w, 1).expand(B, f, w, n)
+        pupil_out = pupil.view(1, 1, 1, n, 2).expand(n_pop, f, w, n, 2)
+        field_out = field.view(1, f, 1, 1, 2).expand(n_pop, f, w, n, 2)
+        wavelength_out = wavelength.view(1, 1, w, 1).expand(n_pop, f, w, n)
 
         return P, V, pupil_out, field_out, wavelength_out
 
@@ -325,6 +316,7 @@ class InfiniteSource(Component):
 
 
 def _field_ranges(fov: Any) -> tuple[tuple[float, float], tuple[float, float]]:
+    """``fov`` 配置 → (x 范围, y 范围)：单值 = 全视场角对称展开；二元组逐轴。"""
     if isinstance(fov, (int, float)):
         half = float(fov) / 2.0
         return (-half, half), (0.0, 0.0)

@@ -1,3 +1,14 @@
+"""材料数据库抽象基类：按编号 + 波长计算折射率的只读参考库。
+
+数据库是跨组件共享的只读参考数据，故为**逐子类单例**（:meth:`create` 获取，
+直接构造抛错）；单例不进入任何模块的参数树，设备 / 精度迁移由
+:class:`~materials.material.Material` 的 ``_apply`` 原地跟进（单进程单链
+约定下的既定行为）。
+
+子类注册：声明 ``kind`` 名词即自动进入注册表，供 :meth:`create_kind` /
+:meth:`for_material` 分派。
+"""
+
 import threading
 from abc import ABC, abstractmethod
 from functools import cached_property
@@ -12,6 +23,7 @@ from core.repr import render_tree, styled
 
 class MaterialDatabase(nn.Module, ABC):
     kind: ClassVar[Noun]
+    _NAMES: ClassVar[tuple[str, ...]]  # 子类覆写：与 names 属性一致
     _REGISTRY: ClassVar[dict[Noun, type["MaterialDatabase"]]] = {}
     _instance: ClassVar["MaterialDatabase | None"] = None
     _lock: ClassVar[threading.RLock]
@@ -23,9 +35,7 @@ class MaterialDatabase(nn.Module, ABC):
         if kind := cls.__dict__.get("kind"):
             cls._REGISTRY[kind] = cls
 
-    # ------------------------------------------------------------------
-    # 单例机械
-    # ------------------------------------------------------------------
+    # ── 单例机械 ──
 
     def __init__(self) -> None:
         super().__init__()
@@ -37,7 +47,7 @@ class MaterialDatabase(nn.Module, ABC):
 
     @classmethod
     def create(cls) -> Self:
-        """创建（或返回既有的）材料数据库单例。"""
+        """创建（或返回既有的）数据库单例。"""
         with cls._lock:
             if cls._instance is None:
                 instance = cls.__new__(cls)
@@ -51,7 +61,7 @@ class MaterialDatabase(nn.Module, ABC):
 
     @classmethod
     def destroy(cls) -> None:
-        """销毁材料数据库单例。"""
+        """销毁数据库单例（测试与流程重建用）。"""
         with cls._lock:
             cls._instance = None
 
@@ -63,18 +73,35 @@ class MaterialDatabase(nn.Module, ABC):
         return self
 
     def __reduce__(self) -> tuple:
-        raise RuntimeError(
-            f"{type(self).__name__} is a singleton and cannot be pickled"
+        raise RuntimeError(f"{type(self).__name__} is a singleton and cannot be pickled")
+
+    # ── 注册表分派 ──
+
+    @classmethod
+    def create_kind(cls, kind: str) -> "MaterialDatabase":
+        """按数据库名词（``constant`` / ``sellmeier``）创建对应单例。"""
+        for noun, sub in cls._REGISTRY.items():
+            if noun.match(kind):
+                return sub.create()
+        raise ValueError(
+            f"unknown material database: {kind!r} "
+            f"(available: {[n.canonical for n in cls._REGISTRY]})"
         )
 
-    # ------------------------------------------------------------------
-    # 抽象契约
-    # ------------------------------------------------------------------
+    @classmethod
+    def for_material(cls, name: str) -> "MaterialDatabase":
+        """返回收录材料 *name* 的数据库单例（未收录抛 ``KeyError``）。"""
+        for sub in cls._REGISTRY.values():
+            if name in sub._NAMES:
+                return sub.create()
+        raise KeyError(
+            f"unknown material: {name!r} (searched: {[n.canonical for n in cls._REGISTRY]})"
+        )
+
+    # ── 抽象契约 ──
 
     @abstractmethod
-    def forward(
-        self, indices: SystemLongScalar, wavelength: RayFloatScalar
-    ) -> RayFloatScalar:
+    def forward(self, indices: SystemLongScalar, wavelength: RayFloatScalar) -> RayFloatScalar:
         """按材料编号与波长计算折射率。"""
 
     @abstractmethod
@@ -91,9 +118,7 @@ class MaterialDatabase(nn.Module, ABC):
     def names(self) -> tuple[str, ...]:
         """材料名称元组（排序规则由子类定义，编号语义随之固定）。"""
 
-    # ------------------------------------------------------------------
-    # 通用实现
-    # ------------------------------------------------------------------
+    # ── 通用实现 ──
 
     @property
     def device(self) -> torch.device:
@@ -121,9 +146,7 @@ class MaterialDatabase(nn.Module, ABC):
         try:
             return self.names[index]
         except IndexError:
-            raise IndexError(
-                f"material index {index} out of range [0, {len(self)})"
-            ) from None
+            raise IndexError(f"material index {index} out of range [0, {len(self)})") from None
 
     def index_of(self, name: str) -> int:
         """材料名称 → 编号。缺失抛 :class:`KeyError`。"""
@@ -136,7 +159,7 @@ class MaterialDatabase(nn.Module, ABC):
             ) from None
 
     def __contains__(self, name: str) -> bool:
-        """检查材料名称是否在数据库中。"""
+        """材料名称是否在库中。"""
         return name in self.name_to_index
 
     def _label(self) -> str:

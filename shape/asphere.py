@@ -1,6 +1,7 @@
-from typing import Any, override, Self
+"""偶次非球面：圆锥基底 + 多项式（含 mask 截断与直径联动重缩放）。"""
+
 from collections.abc import Mapping
-import warnings
+from typing import Any, Self, override
 
 import torch
 
@@ -8,12 +9,12 @@ from core import (
     Noun,
     OpticalModule,
     SystemBoolScalar,
-    SystemFloatScalar,
     SystemFloatND,
+    SystemFloatScalar,
     SystemLongScalar,
     init_param,
-    term,
     parse_param,
+    term,
 )
 from implicit import NewtonSolverOptions, SagFunction, aspheric_sag
 from shape.protocol import Shape
@@ -35,31 +36,10 @@ class Asphere(Shape):
         trainable: Mapping[str, bool] | None = None,
     ):
         super().__init__(diameter, solver_opts=solver_opts, trainable=trainable)
-
-        train_C = False
-        train_K = False
-        train_A = False
-        for k in self.trainable:
-            if (
-                not term.CURVATURE.match(k)
-                and not term.KAPPA.match(k)
-                and not term.ALPHA.match(k)
-                and not term.DIAMETER.match(k)
-            ):
-                warnings.warn(
-                    f"Unknown trainable key: {k}. Only 'curvature', 'kappa', 'alpha' and 'diameter' are supported for Asphere."
-                )
-            else:
-                if term.CURVATURE.match(k):
-                    train_C = self.trainable[k]
-                if term.KAPPA.match(k):
-                    train_K = self.trainable[k]
-                if term.ALPHA.match(k):
-                    train_A = self.trainable[k]
-
-        self.Curvature = init_param(self, term.CURVATURE, curvature, train_C)
-        self.Kappa = init_param(self, term.KAPPA, kappa, train_K)
-        self.Alpha = init_param(self, term.ALPHA, alpha, train_A)
+        flags = self._train_flags(term.CURVATURE, term.KAPPA, term.ALPHA)
+        self.Curvature = init_param(self, term.CURVATURE, curvature, flags[term.CURVATURE])
+        self.Kappa = init_param(self, term.KAPPA, kappa, flags[term.KAPPA])
+        self.Alpha = init_param(self, term.ALPHA, alpha, flags[term.ALPHA])
 
         if mask is None:
             mask = torch.full_like(self.Diameter, float(self.Alpha.shape[-1]))
@@ -73,9 +53,7 @@ class Asphere(Shape):
 
     def _active_alpha(self) -> SystemFloatND:
         """按 mask 屏蔽尾部系数的纯函数视图（零副作用，可训练参数安全）。"""
-        active = torch.arange(self.Alpha.shape[-1], device=self.device).lt(
-            self.Mask.unsqueeze(-1)
-        )
+        active = torch.arange(self.Alpha.shape[-1], device=self.device).lt(self.Mask.unsqueeze(-1))
         return self.Alpha.mul(active)
 
     @override
@@ -83,13 +61,6 @@ class Asphere(Shape):
         alpha = self._active_alpha()
         radius = self.Diameter.mul(0.5)
         return aspheric_sag(self.Curvature, self.Kappa, alpha, radius)
-
-    def _jitter(self, key: Noun, indices: SystemLongScalar, std: float) -> None:
-        if std == 0:
-            return
-        tensor = getattr(self, key.canonical)
-        noise = torch.randn_like(tensor[indices]).mul(std)
-        tensor.index_put_((indices,), noise, accumulate=True)
 
     @override
     def mutate_(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
@@ -112,9 +83,7 @@ class Asphere(Shape):
             scale = rho_new.div(rho_old).pow(powers)
             self.Alpha.copy_(self.Alpha.mul(scale))
 
-        self._jitter(
-            term.CURVATURE, indices, term.CURVATURE.resolve(options, default=0.0)
-        )
+        self._jitter(term.CURVATURE, indices, term.CURVATURE.resolve(options, default=0.0))
         self._jitter(term.KAPPA, indices, term.KAPPA.resolve(options, default=0.0))
 
         std_mask = term.MASK.resolve(options, default=0.0)
@@ -178,6 +147,7 @@ class Asphere(Shape):
 
 
 def _alpha_order_of(key: str) -> int | None:
+    """配置键 → 非球面系数阶数（``alpha4`` / ``alpha6`` ……；不匹配返回 None）。"""
     for name in term.ALPHA.all_names:
         if not key.startswith(name):
             continue
@@ -186,34 +156,32 @@ def _alpha_order_of(key: str) -> int | None:
             return None
         order = int(suffix)
         if order < 4 or order % 2:
-            raise ValueError(f"Invalid alpha coefficient name: {key}")
+            raise ValueError(f"invalid alpha coefficient name: {key}")
         return order
     return None
 
 
 def _alpha_terms(options: Mapping[str, Any], population: int) -> torch.Tensor:
+    """汇总配置中的 ``alpha4/alpha6/...`` 键，按阶数堆叠为 ``(P, Ncoeff)``。"""
     order_to_key = {}
     for key in options:
         order = _alpha_order_of(key)
         if order is None:
             continue
         if order in order_to_key:
-            raise ValueError(f"Duplicate alpha coefficient for order {order}: {key}")
+            raise ValueError(f"duplicate alpha coefficient for order {order}: {key}")
         order_to_key[order] = key
 
     if not order_to_key:
-        raise ValueError("No alpha coefficients found in options")
+        raise ValueError("no alpha coefficients found in options")
 
     sorted_orders = sorted(order_to_key.keys())
     expected = list(range(4, 4 + 2 * len(sorted_orders), 2))
     if sorted_orders != expected:
         missing = set(expected) - set(sorted_orders)
-        raise ValueError(f"Missing alpha coefficients for orders {missing}")
+        raise ValueError(f"missing alpha coefficients for orders {missing}")
 
     return torch.stack(
-        [
-            parse_param(options, order_to_key[order], population)
-            for order in sorted_orders
-        ],
+        [parse_param(options, order_to_key[order], population) for order in sorted_orders],
         dim=-1,
     )

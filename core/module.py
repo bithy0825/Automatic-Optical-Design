@@ -1,15 +1,24 @@
+"""光学模块基类：种群语义、原地 GA 演化操作与树形打印。
+
+所有可训练 / 可演化的光学对象（面形、元件、材料、系统）都继承
+:class:`OpticalModule`。种群约定：批量张量的第 0 维是种群维 ``P``，
+一个模块对象即一整个种群。
+"""
+
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Self
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from itertools import chain
+from typing import Any, ClassVar, Final, Self
 
 import torch
 from torch import nn
 
 from core.aliases import SystemBoolScalar, SystemLongScalar
 from core.noun import Noun
-from core.repr import render_tree, styled
-from core.utils import fmt_param
+from core.repr import fmt_param, render_tree, styled
+
+# 子类定义时被自动包装为 no_grad 的方法（演化操作一律不建图）
+_AUTO_NO_GRAD: Final = ("sort_", "breed_", "mutate_", "clone", "where", "where_")
 
 
 class OpticalModule(nn.Module, ABC):
@@ -17,7 +26,7 @@ class OpticalModule(nn.Module, ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        for name in ("sort_", "breed_", "mutate_", "clone", "where", "where_"):
+        for name in _AUTO_NO_GRAD:
             if name not in cls.__dict__:
                 continue
             attr = cls.__dict__[name]
@@ -27,9 +36,7 @@ class OpticalModule(nn.Module, ABC):
             else:
                 setattr(cls, name, torch.no_grad()(attr))
 
-    # ------------------------------------------------------------------
-    # 抽象契约
-    # ------------------------------------------------------------------
+    # ── 抽象契约 ──
 
     @abstractmethod
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -45,9 +52,7 @@ class OpticalModule(nn.Module, ABC):
     def clone(self) -> Self:
         """深拷贝：生成与本体互不干扰的独立个体（GA 演化所需）。"""
 
-    # ------------------------------------------------------------------
-    # 派生属性
-    # ------------------------------------------------------------------
+    # ── 派生属性 ──
 
     @property
     def device(self) -> torch.device:
@@ -75,9 +80,7 @@ class OpticalModule(nn.Module, ABC):
             return t.shape[0]
         raise RuntimeError(f"{type(self).__name__} has no batched parameters")
 
-    # ------------------------------------------------------------------
-    # GA 演化操作（默认实现，子类按需覆盖）
-    # ------------------------------------------------------------------
+    # ── GA 演化操作（默认实现，子类按需覆盖） ──
 
     @torch.no_grad()
     def sort_(self, order: SystemLongScalar) -> None:
@@ -88,9 +91,7 @@ class OpticalModule(nn.Module, ABC):
     @torch.no_grad()
     def breed_(self, topk: int) -> None:
         """用前 *topk* 个精英滚动复制填充整个种群。"""
-        assert 0 < topk <= self.population, (
-            f"topk must be in (0, {self.population}], got {topk}"
-        )
+        assert 0 < topk <= self.population, f"topk must be in (0, {self.population}], got {topk}"
         idx = torch.arange(self.population - topk, device=self.device).remainder(topk)
         for _name, t in self._batched_tensors():
             t[topk:].copy_(t[:topk][idx])
@@ -100,12 +101,19 @@ class OpticalModule(nn.Module, ABC):
         """对指定索引的个体做高斯扰动（按 ``mutable`` 词表逐项取标准差，
         缺省或为零则跳过）。"""
         for noun in self.mutable:
-            std = noun.resolve(options, default=0.0)
-            if std == 0.0:
-                continue
-            tensor = getattr(self, noun.canonical)
-            noise = torch.randn_like(tensor[indices]).mul(std)
-            tensor.index_put_((indices,), noise, accumulate=True)
+            self._jitter(noun, indices, noun.resolve(options, default=0.0))
+
+    @torch.no_grad()
+    def _jitter(self, key: Noun, indices: SystemLongScalar, std: float) -> None:
+        """对 *key* 名下的批量张量在 *indices* 行上叠加高斯噪声（原地）。
+
+        *std* 为零时直接返回——不消耗随机数，保持随机流与逐项跳过等价。
+        """
+        if std == 0:
+            return
+        tensor = getattr(self, key.canonical)
+        noise = torch.randn_like(tensor[indices]).mul(std)
+        tensor.index_put_((indices,), noise, accumulate=True)
 
     @classmethod
     @torch.no_grad()
@@ -124,7 +132,7 @@ class OpticalModule(nn.Module, ABC):
             mine = list(merged._batched_tensors())
             theirs = list(old._batched_tensors())
             assert [n for n, _ in mine] == [n for n, _ in theirs], "module trees differ"
-            for (_, t), (_, o) in zip(mine, theirs):
+            for (_, t), (_, o) in zip(mine, theirs, strict=True):
                 t.index_copy_(0, reject, o.index_select(0, reject))
         return merged
 
@@ -142,13 +150,11 @@ class OpticalModule(nn.Module, ABC):
             mine = list(self._batched_tensors())
             theirs = list(new._batched_tensors())
             assert [n for n, _ in mine] == [n for n, _ in theirs], "module trees differ"
-            for (_, t), (_, o) in zip(mine, theirs):
+            for (_, t), (_, o) in zip(mine, theirs, strict=True):
                 t.index_copy_(0, rows, o.index_select(0, rows))
 
     @staticmethod
-    def _check_operands(
-        mask: SystemBoolScalar, new: "OpticalModule", old: "OpticalModule"
-    ) -> None:
+    def _check_operands(mask: SystemBoolScalar, new: "OpticalModule", old: "OpticalModule") -> None:
         """``where`` 操作数校验：同类型、同种群、mask 为 ``(P,)`` bool。"""
         if type(new) is not type(old):
             raise TypeError(f"where: {type(new).__name__} vs {type(old).__name__}")
@@ -172,9 +178,7 @@ class OpticalModule(nn.Module, ABC):
             f"{type(self).__name__} has no parameter {canonical!r} (children searched)"
         )
 
-    # ------------------------------------------------------------------
-    # 打印
-    # ------------------------------------------------------------------
+    # ── 打印 ──
 
     def __repr__(self) -> str:
         return render_tree(self)
@@ -194,9 +198,7 @@ class OpticalModule(nn.Module, ABC):
             else:
                 yield f"{name}={tuple(t.shape)}"
 
-    # ------------------------------------------------------------------
-    # 内部工具
-    # ------------------------------------------------------------------
+    # ── 内部工具 ──
 
     @torch.no_grad()
     def _reorder(self, name: str | Noun, order: SystemLongScalar) -> None:
@@ -213,30 +215,3 @@ class OpticalModule(nn.Module, ABC):
         for name, buffer in self.named_buffers():
             if buffer.shape[0] == P:
                 yield name, buffer
-
-
-def init_param(
-    parent: nn.Module,
-    name: str | Noun,
-    value: float | Sequence[float] | torch.Tensor,
-    trainable: bool = False,
-) -> torch.Tensor:
-    key = name.canonical if isinstance(name, Noun) else name
-
-    if isinstance(value, torch.Tensor):
-        tensor = value.detach()
-    else:
-        first_param = next(parent.parameters(), None)
-        device = (
-            first_param.device
-            if first_param is not None
-            else torch.get_default_device()
-        )
-        tensor = torch.tensor(value, device=device)
-
-    if trainable:
-        param = nn.Parameter(tensor)
-        parent.register_parameter(key, param)
-        return param
-    parent.register_buffer(key, tensor)
-    return tensor

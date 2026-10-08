@@ -1,3 +1,5 @@
+"""光线-曲面相交：求交结果、孔径裁决协议与 :func:`intersect` 追迹函数。"""
+
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -20,15 +22,12 @@ from implicit import FieldResult, ImplicitFunction, SolverFunction
 class TraceResult(TensorContainer):
     """光线与单一曲面相交的结果（``Shape.forward`` 的产物）。
 
-    Attributes:
-        distances: 光线参数 *t*（全局系），命中点 = ``points + t·directions``。
-        normals: 全局系单位法向，指向入射介质侧（``normals · directions ≤ 0``）。
-        points_global: 全局系下的命中点。
-        verdict: 追迹裁决——solver 的 ``shape.at(negative).at(convergence)``
-            再链入机械孔径裁决（几何/数值死亡优先于孔径）。
+    ``normals`` 为全局系单位法向，指向入射介质侧（``normals · directions ≤ 0``）；
+    ``verdict`` 为 solver 的 ``shape.at(negative).at(convergence)`` 再链入机械
+    孔径裁决（几何/数值死亡优先于孔径）。
     """
 
-    distances: RayFloatScalar
+    distances: RayFloatScalar  # 光线参数 t（全局系），命中点 = points + t·directions
     normals: RayFloat3D
     points_global: RayFloat3D
     verdict: Verdict
@@ -37,9 +36,9 @@ class TraceResult(TensorContainer):
 class ApertureFunction(Protocol):
     """机械孔径裁决。
 
-    在曲面**局部坐标系**下评估（sag 域为 (x,y) 平面、光轴为 z），
-    返回站点 ``Verdict``：界内 ``hold=True``，越界 ``hold=False``
-    （toll 有符号，正 = 界内余量，见 :class:`~core.verdict.Verdict` 契约）。
+    在曲面**局部坐标系**下评估（sag 域为 (x,y) 平面、光轴为 z），返回站点
+    ``Verdict``：界内 ``hold=True``，越界 ``hold=False``（toll 有符号，
+    正 = 界内余量，见 :class:`~core.flow.Verdict` 契约）。
     """
 
     def __call__(self, points_local: RayFloat3D) -> Verdict: ...
@@ -61,9 +60,7 @@ def circle_aperture(radius: SystemFloatScalar) -> ApertureFunction:
         x, y, _ = points_local.unbind(dim=-1)
         r2 = x.square().add(y.square())
         lim = broadcast_system_to_ray(radius, r2).square()
-        return Verdict.site(
-            hold=r2.le(lim), toll=lim.sub(r2), cause=Verdict.Cause.APERTURE_CLIP
-        )
+        return Verdict.site(hold=r2.le(lim), toll=lim.sub(r2), cause=Verdict.Cause.APERTURE_CLIP)
 
     return _circle_aperture
 
@@ -100,7 +97,7 @@ def intersect(
     # 3. 命中点 + 局部法向（一阶隐式梯度即曲面法向）。
     hit_loc = points_loc.add(directions_loc.mul(distances.unsqueeze(-1)))
     field = implicit(hit_loc, order=FieldResult.Order.GRADIENT)
-    n_loc = F.normalize(field.gradient, dim=-1, eps=1e-12)
+    n_loc = F.normalize(field.grad(), dim=-1)
 
     # 4. 定向：法向反向入射光（normals · directions ≤ 0），使其指向入射介质侧。
     dot = n_loc.mul(directions_loc).sum(dim=-1, keepdim=True)
@@ -112,7 +109,7 @@ def intersect(
 
     # 6. 法向回到全局系并归一化——防御性消除变换可能引入的数值误差，
     #    保证 |normal| = 1。
-    normals = F.normalize(transformer.transform_vectors(n_loc), dim=-1, eps=1e-12)
+    normals = F.normalize(transformer.transform_vectors(n_loc), dim=-1)
 
     # 7. 机械孔径裁决最后链入：几何/数值死亡（solver）优先于孔径越界。
     verdict = res.verdict.at(aperture_fn(hit_loc))

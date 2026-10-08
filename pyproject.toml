@@ -1,10 +1,13 @@
-[tool.pyright]
-reportIncompatibleMethodOverride = "none"
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4"]
+ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-# jaxtyping 维度串注解（如 Float[Tensor, "B F W N"]）会误触 F722/F821
+# jaxtyping 维度串注解（如 Float[Tensor, "P F W N"]）会误触 F722/F821
 "core/aliases.py" = ["F722", "F821"]
 "sampling/_core.py" = ["F722", "F821"]
 "component/source.py" = ["F722", "F821"]
-[tool.ruff.lint]
-ignore = ["I001"]

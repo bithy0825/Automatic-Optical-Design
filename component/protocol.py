@@ -1,12 +1,17 @@
+"""元件抽象基类：``TraceFlow`` 的消费者 / 生产者与注册表分派。
+
+子类声明 ``kind`` 名词即自动注册；``from_options`` 按 ``type`` 键分派。
+"""
+
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Self, cast
 from collections.abc import Mapping
+from typing import Any, ClassVar, Self, cast
 
 from core import Noun, OpticalModule, TraceFlow, term
 
 
 class Component(OpticalModule, ABC):
-    """光学系统中的一个元件：消费并产出 :class:`~core.trace_flow.TraceFlow`。"""
+    """光学系统中的一个元件：消费并产出 :class:`~core.flow.TraceFlow`。"""
 
     kind: ClassVar[Noun]
     _REGISTRY: ClassVar[dict[Noun, type["Component"]]] = {}
@@ -29,6 +34,5 @@ class Component(OpticalModule, ABC):
             if kind in noun:
                 return cast(Self, sub.from_options(population, options))
         raise ValueError(
-            f"Unknown component: {kind!r} "
-            f"(available: {[n.canonical for n in cls._REGISTRY]})"
+            f"unknown component: {kind!r} (available: {[n.canonical for n in cls._REGISTRY]})"
         )

@@ -1,6 +1,14 @@
+"""光学面形抽象基类：sag 契约、求解器装配与注册表分派。
+
+子类声明 ``kind`` 名词即自动注册；``from_options`` 按 ``shape`` 键分派。
+可训练标记严格 opt-in：``diameter`` 由基类统一消费，其余参数名词经
+:meth:`Shape._train_flags` 由子类认领，未知键告警并忽略。
+"""
+
+import warnings
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Self, cast
 from collections.abc import Mapping
+from typing import Any, ClassVar, Self, cast
 
 from core import (
     Noun,
@@ -19,12 +27,7 @@ from implicit import (
     make_solver_options,
     solve,
 )
-from shape.trace import (
-    ApertureFunction,
-    TraceResult,
-    circle_aperture,
-    intersect,
-)
+from shape.trace import ApertureFunction, TraceResult, circle_aperture, intersect
 
 
 class Shape(OpticalModule, ABC):
@@ -48,10 +51,9 @@ class Shape(OpticalModule, ABC):
         Args:
             diameter: 机械直径 (mm)，``(P,)`` 张量。
             solver_opts: 求解器选项实例或配置映射，缺省为 Newton 默认值。
-            trainable: 可训练标记（严格 opt-in，直径与其他参数同规：仅当
-                ``train`` 映射显式点名 ``diameter`` 才注册为可训练参数，
-                缺省冻结为 buffer，由 GA 变异 + bounds 铰链演化约束；
-                其余键经词表校验由子类解释）。
+            trainable: 可训练标记（严格 opt-in：仅当映射显式点名才注册为
+                可训练参数，否则冻结为 buffer，由 GA 变异 + bounds 铰链演化
+                约束；其余键经词表校验由子类解释）。
         """
         super().__init__()
         if trainable is not None and not isinstance(trainable, Mapping):
@@ -67,6 +69,28 @@ class Shape(OpticalModule, ABC):
             solver_opts = make_solver_options(**solver_opts)
         self._solver_opts = solver_opts
         self._solver_fn: SolverFunction = solve(solver_opts)
+
+    def _train_flags(self, *nouns: Noun) -> dict[Noun, bool]:
+        """解析 ``trainable`` 映射中各参数名词的训练标志（缺省 ``False``）。
+
+        ``diameter`` 由基类统一消费、不在 *nouns* 中列出；未知名词告警并忽略。
+        """
+        flags: dict[Noun, bool] = dict.fromkeys(nouns, False)
+        for key, value in self.trainable.items():
+            if term.DIAMETER.match(key):
+                continue
+            for noun in nouns:
+                if noun.match(key):
+                    flags[noun] = bool(value)
+                    break
+            else:
+                supported = ["diameter", *(n.canonical.lower() for n in nouns)]
+                warnings.warn(
+                    f"unknown trainable key {key!r} for {type(self).__name__} "
+                    f"(supported: {supported})",
+                    stacklevel=2,
+                )
+        return flags
 
     @abstractmethod
     def sag(self) -> SagFunction:
@@ -94,6 +118,5 @@ class Shape(OpticalModule, ABC):
             if kind in noun:
                 return cast(Self, sub.from_options(population, options))
         raise ValueError(
-            f"Unknown shape: {kind!r} "
-            f"(available: {[n.canonical for n in cls._REGISTRY]})"
+            f"unknown shape: {kind!r} (available: {[n.canonical for n in cls._REGISTRY]})"
         )

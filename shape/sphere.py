@@ -1,6 +1,7 @@
-from typing import Any, Self, override
+"""球面。"""
+
 from collections.abc import Mapping
-import warnings
+from typing import Any, Self, override
 
 import torch
 
@@ -9,14 +10,10 @@ from core import (
     SystemBoolScalar,
     SystemFloatScalar,
     init_param,
-    term,
     parse_param,
+    term,
 )
-from implicit import (
-    NewtonSolverOptions,
-    SagFunction,
-    spherical_sag,
-)
+from implicit import NewtonSolverOptions, SagFunction, spherical_sag
 from shape.protocol import Shape
 
 
@@ -33,18 +30,8 @@ class Sphere(Shape):
         trainable: Mapping[str, bool] | None = None,
     ):
         super().__init__(diameter, solver_opts=solver_opts, trainable=trainable)
-
-        train_C = False
-        for k in self.trainable:
-            if not term.CURVATURE.match(k) and not term.DIAMETER.match(k):
-                warnings.warn(
-                    f"Unknown trainable key: {k}. Only 'curvature' and 'diameter' are supported for Sphere."
-                )
-            else:
-                if term.CURVATURE.match(k):
-                    train_C = self.trainable[k]
-
-        self.Curvature = init_param(self, term.CURVATURE, curvature, train_C)
+        flags = self._train_flags(term.CURVATURE)
+        self.Curvature = init_param(self, term.CURVATURE, curvature, flags[term.CURVATURE])
 
     @override
     def sag(self) -> SagFunction:

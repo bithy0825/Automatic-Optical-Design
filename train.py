@@ -2,10 +2,11 @@
 
     python train.py CONFIG [--device D] [--seed N] [--output PATH] [--resume PATH]
                            [--save-every N] [--history PATH] [--no-progress]
-                           [--set KEY=VALUE]...
+                           [--dtype-switch RATIO] [--set KEY=VALUE]...
 
-光学系统 / GA / 优化阶段 / 损失权重全部来自配置文件（结构见 demo/config.toml）；
-运行控制参数写在配置的 ``[train]`` 节，命令行同名选项临时覆盖::
+光学系统 / GA / 优化阶段 / 损失权重全部来自配置文件（结构见转换器产物或
+``convert/`` 头部模板）；运行控制参数写在配置的 ``[train]`` 节，命令行
+同名选项临时覆盖::
 
     [train]
     seed = 0                  # 缺省不固定种子
@@ -36,6 +37,7 @@ from component import Sequential
 from core import term
 from core.noun import Noun
 from optimization import (
+    Callback,
     GAOptions,
     GeneticAlgorithm,
     LossHistory,
@@ -56,7 +58,7 @@ def apply_override(cfg: dict[str, Any], expr: str) -> None:
     """``KEY=VALUE``：点分路径下钻（数字段进列表），值按 TOML 解析，缺层自动建表。"""
     key, sep, raw = expr.partition("=")
     if not sep:
-        raise ValueError(f"--set 需要 KEY=VALUE 形式: {expr!r}")
+        raise ValueError(f"--set expects KEY=VALUE, got {expr!r}")
     value = tomllib.loads(f"x = {raw}")["x"]
     *parents, leaf = key.split(".")
     node: Any = cfg
@@ -82,9 +84,7 @@ class RunConfig:
     dtype_switch: float | None
 
 
-def resolve_run(
-    cfg: Mapping[str, Any], args: argparse.Namespace, config_path: Path
-) -> RunConfig:
+def resolve_run(cfg: Mapping[str, Any], args: argparse.Namespace, config_path: Path) -> RunConfig:
     """合并 ``[train]`` 节与 CLI（CLI 优先）。
 
     相对路径：配置值相对配置文件目录，CLI 值相对 CWD。
@@ -153,8 +153,7 @@ def report(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="train",
-        description="TOML 配置驱动的光学系统优化"
-        "（结构见 demo/config.toml；运行控制见 [train] 节）",
+        description="TOML 配置驱动的光学系统优化（结构见转换器产物；运行控制见 [train] 节）",
     )
     p.add_argument("config", help="配置 TOML 路径")
     p.add_argument("--device", help="训练设备：auto/cuda/cpu…（缺省 auto）")
@@ -163,9 +162,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", help="从检查点注入参数续训（strict，结构须一致）")
     p.add_argument("--save-every", type=int, help="每 N 代滚动保存检查点")
     p.add_argument("--history", help="损失历史导出 JSON 路径")
-    p.add_argument(
-        "--no-progress", dest="progress", action="store_false", help="关闭进度条"
-    )
+    p.add_argument("--no-progress", dest="progress", action="store_false", help="关闭进度条")
     p.add_argument(
         "--dtype-switch",
         type=float,
@@ -192,6 +189,7 @@ def main() -> None:
         apply_override(cfg, expr)
     run = resolve_run(cfg, args, config_path)
 
+    # 训练中途切换精度：前段 float32 提速，后段 float64 收束（0 = 全程 f64）
     if run.dtype_switch and run.dtype_switch > 0:
         torch.set_default_dtype(torch.float32)
     else:
@@ -203,9 +201,7 @@ def main() -> None:
     target = build_target(cfg)
     seq = build_sequential(cfg, target).to(run.device)
     if run.resume is not None:
-        _saved_cfg, state = torch.load(
-            run.resume, weights_only=True, map_location="cpu"
-        )
+        _saved_cfg, state = torch.load(run.resume, weights_only=True, map_location="cpu")
         seq.load_state_dict(state, strict=True)
 
     blocks = term.COMPONENT.resolve(cfg)
@@ -225,14 +221,14 @@ def main() -> None:
     )
 
     history = LossHistory()
-    callbacks: list[Any] = [history]
+    callbacks: list[Callback] = [history]
     if run.progress:
         callbacks.append(
             ProgressBar(
                 o.generation,
                 {
                     term.TYPE.resolve(b): s.options.step
-                    for b, s in zip(optimizer_blocks, stages)
+                    for b, s in zip(optimizer_blocks, stages, strict=True)
                 },
             )
         )
@@ -261,9 +257,7 @@ def main() -> None:
 
     if run.history is not None:
         run.history.parent.mkdir(parents=True, exist_ok=True)
-        run.history.write_text(
-            json.dumps(history.records, ensure_ascii=False, indent=2)
-        )
+        run.history.write_text(json.dumps(history.records, ensure_ascii=False, indent=2))
         print(f"历史:      {run.history}")
 
 

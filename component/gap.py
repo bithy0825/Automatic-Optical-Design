@@ -1,11 +1,13 @@
-from typing import Any, Self, override
+"""间隔：位姿沿光轴推进，光线与裁决原样传递。"""
+
 from collections.abc import Mapping, Sequence
+from typing import Any, Self, override
 
 import torch
 import torch.nn.functional as F
 
+from component.protocol import Component
 from core import (
-    term,
     OpticalModule,
     SystemBoolScalar,
     SystemFloatScalar,
@@ -13,8 +15,8 @@ from core import (
     Transformer,
     init_param,
     parse_param,
+    term,
 )
-from component.protocol import Component
 
 
 class Gap(Component):
@@ -24,7 +26,7 @@ class Gap(Component):
     Gap 只负责把位姿原点送到下一个面。
 
     Args:
-        thickness: 间隔厚度 (mm)，标量或 (P,) 张量。
+        thickness: 间隔厚度 (mm)，标量或 ``(P,)`` 张量。
         trainable: 是否注册为可训练参数（GA / 梯度优化）。
     """
 

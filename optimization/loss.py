@@ -1,11 +1,19 @@
+"""损失函数：像差（EFFL / 模糊 / 畸变）+ 死亡惩罚 + 参数边界，加权合成。
+
+各分项返回逐个体张量 ``(P,)``；:func:`total_loss` 汇总并附分项字典
+（日志与 GA 择优用）。死光线的发散几何（NaN 命中点 / 天文数字距离）会以
+0×NaN、0×inf 形式污染加权和，故分项先 ``nan_to_num`` 归零再求和——
+该个体的该项视为无信号，排序由其余分项决定。
+"""
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Self
 
 import torch
 
-from core import Noun, SystemFloatScalar, TraceFlow, Verdict, sturdy_div, term
 from component import Sensor, Sequential
+from core import Noun, SystemFloatScalar, TraceFlow, Verdict, sturdy_div, term
 from optimization.target import Target
 
 _CAUSE_NOUNS: tuple[tuple[Noun, Verdict.Cause], ...] = (
@@ -81,9 +89,7 @@ class LossWeights:
         )
 
 
-def effl_loss(
-    flow: TraceFlow, target: Target, weights: LossWeights
-) -> SystemFloatScalar:
+def effl_loss(flow: TraceFlow, target: Target, weights: LossWeights) -> SystemFloatScalar:
     """加权相对 EFFL 误差：``w · ((f_est − f*) / f*)²``。"""
     t = flow.rays.field.tan()  # (P,F,W,N,2) tanθ
     h = flow.rays.points[..., :2]  # 传感器落点 (x, y)
@@ -107,9 +113,7 @@ def _chief(flow: TraceFlow) -> torch.Tensor:
     return sturdy_div(w.unsqueeze(-1).mul(h).sum(dim=(2, 3), keepdim=True), den)
 
 
-def blur_loss(
-    flow: TraceFlow, seq: Sequential, weights: LossWeights
-) -> SystemFloatScalar:
+def blur_loss(flow: TraceFlow, seq: Sequential, weights: LossWeights) -> SystemFloatScalar:
     """模糊损失：相对本视场主光线的均方偏差 (mm²)。
 
     幸存光线按真实 r²（绕本视场主光线）；死亡光线每条按 **sensor 半径平方**
@@ -122,9 +126,7 @@ def blur_loss(
     r2 = h.sub(_chief(flow)).square().sum(dim=-1)
     dead_r2 = _dead_r2(seq)
     if dead_r2 is None:
-        return sturdy_div(w.mul(r2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
-            weights.blur
-        )
+        return sturdy_div(w.mul(r2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(weights.blur)
     r2 = torch.where(w, r2, dead_r2.view(-1, 1, 1, 1))
     return r2.mean(dim=(1, 2, 3)).mul(weights.blur)
 
@@ -137,9 +139,7 @@ def _dead_r2(seq: Sequential) -> SystemFloatScalar | None:
     return None
 
 
-def distortion_loss(
-    flow: TraceFlow, target: Target, weights: LossWeights
-) -> SystemFloatScalar:
+def distortion_loss(flow: TraceFlow, target: Target, weights: LossWeights) -> SystemFloatScalar:
     """加权畸变：逐视场主光线相对理想像点的均方偏差 (mm²)——焦距 / 畸变。
 
     与 :func:`blur_loss` 互补：两者等权之和精确等于"相对理想像点的点列"
@@ -148,9 +148,7 @@ def distortion_loss(
     w = flow.verdict.hold
     ideal = flow.rays.field.tan().mul(target.effl)
     d2 = _chief(flow).sub(ideal).square().sum(dim=-1)
-    return sturdy_div(w.mul(d2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(
-        weights.distortion
-    )
+    return sturdy_div(w.mul(d2).sum(dim=(1, 2, 3)), w.sum(dim=(1, 2, 3))).mul(weights.distortion)
 
 
 def toll_loss(flow: TraceFlow, weights: LossWeights) -> SystemFloatScalar:
@@ -160,9 +158,7 @@ def toll_loss(flow: TraceFlow, weights: LossWeights) -> SystemFloatScalar:
     for _noun, cause in _CAUSE_NOUNS:
         weight = weights.toll.get(cause, 1.0)
         if weight != 0.0:
-            total = total.add(
-                v.toll.mul(v.cause.eq(cause)).mean(dim=(1, 2, 3)).mul(weight)
-            )
+            total = total.add(v.toll.mul(v.cause.eq(cause)).mean(dim=(1, 2, 3)).mul(weight))
     return total
 
 

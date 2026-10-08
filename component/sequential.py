@@ -1,26 +1,22 @@
+"""元件链：按序级联的完整光学系统与追迹驱动。"""
+
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any, Self, cast, override
 
 from torch import nn
 
-from core import (
-    Noun,
-    OpticalModule,
-    SystemBoolScalar,
-    SystemLongScalar,
-    TraceFlow,
-    term,
-)
-from core.repr import styled
 from component.protocol import Component
 from component.refractor import Refractor
 from component.sensor import Sensor
 from component.source import InfiniteSource
 from component.stop import Stop
+from core import Noun, OpticalModule, SystemBoolScalar, SystemLongScalar, TraceFlow, term
+from core.repr import styled
 from materials import Material
 from shape import Shape
 
-FlowCallback = Callable[[Component, TraceFlow, int], TraceFlow]
+type FlowCallback = Callable[[Component, TraceFlow, int], TraceFlow]
+"""追迹回调：``(元件, 当前 flow, 站点序号) → 新 flow``（观测或误差注入用）。"""
 
 
 class Sequential(Component):
@@ -36,11 +32,10 @@ class Sequential(Component):
         super().__init__()
         self.components = nn.ModuleList(components)
 
-    # ------------------------------------------------------------------
-    # 结构
-    # ------------------------------------------------------------------
+    # ── 结构 ──
 
     def append(self, component: Component) -> None:
+        """追加元件并重绑材料链。"""
         self.components.append(component)
         self.rebind()
 
@@ -73,9 +68,7 @@ class Sequential(Component):
             if isinstance(comp, (Refractor, Stop, Sensor)):
                 yield comp.shape
 
-    # ------------------------------------------------------------------
-    # 追迹
-    # ------------------------------------------------------------------
+    # ── 追迹 ──
 
     @override
     def forward(
@@ -84,32 +77,24 @@ class Sequential(Component):
         *,
         callback: FlowCallback | Iterable[FlowCallback] | None = None,
     ) -> TraceFlow:
+        """沿链逐元件追迹；每个元件之后依序调用全部 *callback*。"""
         callbacks: tuple[FlowCallback, ...] = (
-            ()
-            if callback is None
-            else (callback,)
-            if callable(callback)
-            else tuple(callback)
+            () if callback is None else (callback,) if callable(callback) else tuple(callback)
         )
         if flow is None and (
-            len(self.components) == 0
-            or not isinstance(self.components[0], InfiniteSource)
+            len(self.components) == 0 or not isinstance(self.components[0], InfiniteSource)
         ):
             raise RuntimeError(
                 "flow=None requires the first component to be an InfiniteSource, "
                 f"got {type(self.components[0]).__name__ if len(self.components) else 'empty chain'}"
             )
         for i, comp in enumerate(self):
-            flow = comp(
-                cast(TraceFlow, flow)
-            )  # i=0 且 flow=None 时已校验首元件为 Source
+            flow = comp(cast(TraceFlow, flow))  # i=0 且 flow=None 时已校验首元件为 Source
             for cb in callbacks:
                 flow = cb(comp, cast(TraceFlow, flow), i)
         return cast(TraceFlow, flow)
 
-    # ------------------------------------------------------------------
-    # GA / 快照
-    # ------------------------------------------------------------------
+    # ── GA / 快照 ──
 
     @override
     def mutate_(
@@ -135,9 +120,7 @@ class Sequential(Component):
         components: list[Component] = []
         for n, o in zip(new, old, strict=True):
             if type(n) is not type(o):
-                raise TypeError(
-                    f"where: component {type(n).__name__} vs {type(o).__name__}"
-                )
+                raise TypeError(f"where: component {type(n).__name__} vs {type(o).__name__}")
             components.append(type(n).where(mask, n, o))
         seq = cls(*components)
         seq.rebind()

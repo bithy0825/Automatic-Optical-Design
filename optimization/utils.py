@@ -1,12 +1,18 @@
+"""配置的装载、系统的构建与存档。
+
+``save`` / ``load`` 检查点为 ``(完整配置, 训练后参数状态)`` 二元组：
+配置原样附带（可无损重建系统），参数经 ``state_dict`` 序列化。
+"""
+
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-import tomllib
 
 import torch
 
-from core import term
 from component import Sequential
+from core import term
 from optimization.annealing import SAOptions, SimulatedAnnealing
 from optimization.genetic import Stager
 from optimization.gradient import (
@@ -23,7 +29,7 @@ def load_config(path: str) -> dict[str, Any]:
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
     if not isinstance(cfg, Mapping):
-        raise TypeError(f"Invalid configuration: {cfg!r}")
+        raise TypeError(f"invalid configuration: {cfg!r}")
     return cfg
 
 
@@ -33,14 +39,17 @@ def build_target(cfg: Mapping[str, Any]) -> Target:
     return Target.from_options(target_)
 
 
-def build_sequential(
-    cfg: Mapping[str, Any] | str, target: Target | None = None
-) -> Sequential:
+def build_sequential(cfg: Mapping[str, Any] | str, target: Target | None = None) -> Sequential:
+    """从配置（或 TOML 路径）构造光学系统链；target 缺省时从配置构建。
+
+    ``target`` 的标量规格（fov / F / effl / epd / wavelength）并入 source
+    元件块——光源块只需写采样与材料。
+    """
     if isinstance(cfg, str):
         cfg = load_config(cfg)
 
     if not isinstance(cfg, Mapping):
-        raise TypeError(f"Invalid configuration: {cfg!r}")
+        raise TypeError(f"invalid configuration: {cfg!r}")
 
     if target is None:
         target = build_target(cfg)
@@ -57,17 +66,17 @@ def build_sequential(
 
 
 def save(seq: Sequential, cfg: Mapping[str, Any], path: str | Path) -> None:
-    """保存训练检查点:``(完整配置, 训练后参数状态)`` 二元组。
+    """保存训练检查点：``(完整配置, 训练后参数状态)`` 二元组。
 
-    配置原样附带(可无损重建系统);参数经 ``seq.state_dict()`` 序列化,
-    键由模块树自动生成(含曲率、厚度、直径、材料编号等全部批量张量)。
+    配置原样附带（可无损重建系统）；参数经 ``seq.state_dict()`` 序列化，
+    键由模块树自动生成（含曲率、厚度、直径、材料编号等全部批量张量）。
     加载见 :func:`load`。
     """
     torch.save((dict(cfg), seq.state_dict()), path)
 
 
 def load(path: str | Path) -> tuple[Sequential, Target]:
-    """加载训练检查点:按附带配置重建系统并注入训练后状态(strict)。"""
+    """加载训练检查点：按附带配置重建系统并注入训练后状态（strict）。"""
     cfg, state = torch.load(path, weights_only=True, map_location="cpu")
     target = build_target(cfg)
     seq = build_sequential(cfg, target)
@@ -76,7 +85,7 @@ def load(path: str | Path) -> tuple[Sequential, Target]:
 
 
 def build_stage(block: Mapping[str, Any]) -> Stager:
-    """按 ``type`` 分发构造一个优化阶段（sa / adam / sgd）。"""
+    """按 ``type`` 分发构造一个优化阶段（sa / adam / adamw / sgd）。"""
     match term.TYPE.resolve(block):
         case "sa":
             return SimulatedAnnealing(SAOptions.from_options(block))
@@ -87,4 +96,4 @@ def build_stage(block: Mapping[str, Any]) -> Stager:
         case "sgd":
             return GradientOptimizer(SGDOptions.from_options(block))
         case other:
-            raise ValueError(f"Unknown optimizer type: {other!r}")
+            raise ValueError(f"unknown optimizer type: {other!r}")

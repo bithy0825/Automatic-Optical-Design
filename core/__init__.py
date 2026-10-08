@@ -1,4 +1,19 @@
-# Type aliases (jaxtyping-annotated)
+"""核心模块：追迹数据模型、光学模块基类、配置词表与底层张量原语。
+
+模块组织
+--------
+* :mod:`core.aliases` —— 张量形状约定（jaxtyping 别名 + System→Ray 对齐原语）。
+* :mod:`core.noun` / :mod:`core.term` —— 规范名词与全库唯一词表。
+* :mod:`core.container` —— 张量容器基类（``apply`` / ``to`` / ``clone`` 免费获得）。
+* :mod:`core.flow` —— 追迹数据流：``Verdict`` / ``RayBundle`` / ``TraceFlow``。
+* :mod:`core.transformer` —— 逐个体 4×4 齐次变换（正 / 逆矩阵成对维护）。
+* :mod:`core.module` —— 光学模块基类 :class:`OpticalModule`（种群语义 + GA 演化）。
+* :mod:`core.params` —— 参数注册与分布规格解析。
+* :mod:`core.sturdy_math` —— NaN 安全的数值原语。
+* :mod:`core.repr` —— rich 树形打印与参数格式化。
+"""
+
+from core import term
 from core.aliases import (
     HomMatrix,
     RayBoolScalar,
@@ -19,20 +34,20 @@ from core.aliases import (
     SystemFloatND,
     SystemFloatScalar,
     SystemLongScalar,
+    broadcast_system_to_ray,
 )
 from core.container import TensorContainer
-from core.module import OpticalModule, init_param
+from core.flow import RayBundle, TraceFlow, Verdict
+from core.module import OpticalModule
 from core.noun import Noun
-from core import term
-from core.ray_bundle import RayBundle
+from core.params import init_param, parse_param
+from core.repr import fmt_param
 from core.sturdy_math import sturdy_div, sturdy_inv, sturdy_sqrt
-from core.trace_flow import TraceFlow
 from core.transformer import Transformer
-from core.utils import broadcast_system_to_ray, fmt_param, parse_param
-from core.verdict import Verdict
 
 __all__ = [
-    # aliases
+    # 形状约定
+    "HomMatrix",
     "RayBoolScalar",
     "RayFloat2D",
     "RayFloat3D",
@@ -41,7 +56,6 @@ __all__ = [
     "RayFloatMatrix4D",
     "RayFloatScalar",
     "RayLongScalar",
-    "HomMatrix",
     "SystemBoolND",
     "SystemBoolScalar",
     "SystemFloat2D",
@@ -52,23 +66,24 @@ __all__ = [
     "SystemFloatND",
     "SystemFloatScalar",
     "SystemLongScalar",
-    # container & module
+    "broadcast_system_to_ray",
+    # 容器与基类
     "TensorContainer",
     "OpticalModule",
-    "init_param",
-    "parse_param",
-    # terminology
+    # 词表
     "Noun",
     "term",
-    # trace data
+    # 追迹数据流
     "RayBundle",
     "TraceFlow",
     "Transformer",
     "Verdict",
-    # math
+    # 参数构造
+    "init_param",
+    "parse_param",
+    # 数值原语与打印
     "sturdy_div",
     "sturdy_inv",
     "sturdy_sqrt",
-    "broadcast_system_to_ray",
     "fmt_param",
 ]

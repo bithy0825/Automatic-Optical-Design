@@ -2,18 +2,20 @@
 
 模块组织
 --------
-* :mod:`shape.protocol` — 抽象基类 :class:`Shape`。
-* :mod:`shape.trace` — 光线‑曲面相交结果与追迹函数。
-* :mod:`shape.sphere` — 球面。
-* :mod:`shape.conic` — 圆锥曲面（椭球/抛物面/双曲面）。
-* :mod:`shape.asphere` — 偶次非球面（圆锥基底 + 多项式）。
-* :mod:`shape.disk` — 平面（无限薄孔径光阑 / 像面）。
+* :mod:`shape.protocol` —— 抽象基类 :class:`Shape`（含 ``_train_flags``
+  可训练标记解析）。
+* :mod:`shape.trace` —— 光线-曲面相交结果与追迹函数。
+* :mod:`shape.sphere` —— 球面。
+* :mod:`shape.conic` —— 圆锥曲面（椭球 / 抛物面 / 双曲面）。
+* :mod:`shape.asphere` —— 偶次非球面（圆锥基底 + 多项式）。
+* :mod:`shape.disk` —— 平面（无限薄孔径光阑 / 像面）。
 """
 
-# ── 抽象基类 ──
+from shape.asphere import Asphere
+from shape.conic import Conic
+from shape.disk import Disk
 from shape.protocol import Shape
-
-# ── 追迹结果与工具 ──
+from shape.sphere import Sphere
 from shape.trace import (
     ApertureFunction,
     TraceResult,
@@ -21,13 +23,6 @@ from shape.trace import (
     intersect,
     no_aperture,
 )
-
-# ── 具体面形 ──
-from shape.asphere import Asphere
-from shape.conic import Conic
-from shape.disk import Disk
-from shape.sphere import Sphere
-
 
 __all__ = [
     # 基类

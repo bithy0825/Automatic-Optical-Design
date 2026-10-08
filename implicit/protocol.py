@@ -1,3 +1,10 @@
+"""契约层：求解器选项、求值结果与函数协议。
+
+``FieldResult`` 的 ``gradient`` / ``hessian`` 按求值阶数可选：低于所需阶
+时为 ``None``，经 :meth:`FieldResult.grad` / :meth:`FieldResult.hess`
+断言访问器取用，调用方不必逐处处理 ``None``。
+"""
+
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 from typing import Protocol, Self
@@ -14,16 +21,7 @@ from core import (
 
 @dataclass(slots=True, eq=False)
 class NewtonSolverOptions:
-    """求解器选项。
-
-    Attributes:
-        tol:            收敛阈值（|f| < tol 视为收敛）。
-        num_iter:       迭代步数（末步带梯度展开）。
-        damping:        阻尼系数 (0, 1]。
-        allow_negative: 允许负 distances 根（首面合法，中间面为 X 型打架判死）。
-        init_method:    初值策略。
-        method:         单步格式（子类以 ``init=False`` 覆盖）。
-    """
+    """求解器选项（构造即校验）。"""
 
     class Method(StrEnum):
         NEWTON = "newton"
@@ -34,20 +32,23 @@ class NewtonSolverOptions:
         RANDOM = "random"
         ZERO = "zero"
 
-    tol: float = 1e-4
-    num_iter: int = 6
-    damping: float = 0.95
-    allow_negative: bool = False
-    init_method: Init = Init.CLOSEST
-    method: Method = Method.NEWTON
+    tol: float = 1e-4  # 收敛阈值（|f| < tol 视为收敛）
+    num_iter: int = 6  # 迭代步数（末步带梯度展开）
+    damping: float = 0.95  # 阻尼系数 (0, 1]
+    allow_negative: bool = False  # 允许负根（首面合法，中间面 X 型打架判死）
+    init_method: Init = Init.CLOSEST  # 初值策略
+    method: Method = Method.NEWTON  # 单步格式（子类以 init=False 覆盖）
 
     def __post_init__(self) -> None:
-        assert self.tol > 0, "Tolerance must be positive"
-        assert self.num_iter > 0, "Number of iterations must be positive"
-        assert 0 < self.damping <= 1, "Damping must be in (0, 1]"
+        if self.tol <= 0:
+            raise ValueError(f"tol must be positive, got {self.tol}")
+        if self.num_iter <= 0:
+            raise ValueError(f"num_iter must be positive, got {self.num_iter}")
+        if not 0 < self.damping <= 1:
+            raise ValueError(f"damping must be in (0, 1], got {self.damping}")
 
     def update(self, **kwargs) -> Self:
-        """返回一个新的选项实例，更新指定的字段。"""
+        """返回一个更新了指定字段的新实例。"""
         return replace(self, **kwargs)
 
 
@@ -62,9 +63,9 @@ class HalleySolverOptions(NewtonSolverOptions):
 
 @dataclass(frozen=True, slots=True)
 class FieldResult:
-    """sag / 隐式函数的求值结果（梯度与 Hessian 按 order 可选）。
+    """sag / 隐式函数的求值结果（``gradient`` / ``hessian`` 按 order 可选）。
 
-    访问器集中断言可用性，调用方不必逐处 ``assert is not None``。
+    ``Order.VALUE`` 仅求值；``GRADIENT`` 附一阶导；``HESSIAN`` 附二阶导。
     """
 
     class Order(IntEnum):
@@ -72,65 +73,41 @@ class FieldResult:
         GRADIENT = 1
         HESSIAN = 2
 
-    _value: RayFloatScalar
-    _verdict: Verdict
-    _gradient: RayFloat3D | None = None
-    _hessian: RayFloatMatrix2D | RayFloatMatrix3D | None = None
+    value: RayFloatScalar
+    verdict: Verdict
+    gradient: RayFloat3D | None = None
+    hessian: RayFloatMatrix2D | RayFloatMatrix3D | None = None
 
-    @property
-    def value(self) -> RayFloatScalar:
-        return self._value
+    def grad(self) -> RayFloat3D:
+        """一阶导（求值阶数不足时断言失败）。"""
+        assert self.gradient is not None, "gradient unavailable: evaluate with order >= GRADIENT"
+        return self.gradient
 
-    @property
-    def verdict(self) -> Verdict:
-        return self._verdict
-
-    @property
-    def gradient(self) -> RayFloat3D:
-        assert self._gradient is not None, "Gradient is not available"
-        return self._gradient
-
-    @property
-    def hessian(self) -> RayFloatMatrix2D | RayFloatMatrix3D:
-        assert self._hessian is not None, "Hessian is not available"
-        return self._hessian
+    def hess(self) -> RayFloatMatrix2D | RayFloatMatrix3D:
+        """二阶导（求值阶数不足时断言失败）。"""
+        assert self.hessian is not None, "hessian unavailable: evaluate with order >= HESSIAN"
+        return self.hessian
 
 
 @dataclass(frozen=True, slots=True)
 class SolverResult:
-    """求解器结果（distances / value / verdict 严格同点）。"""
+    """求解器结果（``distances`` / ``value`` / ``verdict`` 严格同点）。"""
 
-    _distances: RayFloatScalar
-    _value: RayFloatScalar
-    _verdict: Verdict
-
-    @property
-    def distances(self) -> RayFloatScalar:
-        return self._distances
-
-    @property
-    def value(self) -> RayFloatScalar:
-        return self._value
-
-    @property
-    def verdict(self) -> Verdict:
-        return self._verdict
+    distances: RayFloatScalar
+    value: RayFloatScalar
+    verdict: Verdict
 
 
 class SagFunction(Protocol):
     """矢高函数：横向 (x, y) → 矢高 z 及其导数。"""
 
-    def __call__(
-        self, points: RayFloat2D, *, order: FieldResult.Order
-    ) -> FieldResult: ...
+    def __call__(self, points: RayFloat2D, *, order: FieldResult.Order) -> FieldResult: ...
 
 
 class ImplicitFunction(Protocol):
     """3D 隐式函数：``f(x, y, z) = 0`` 等值面即曲面。"""
 
-    def __call__(
-        self, points: RayFloat3D, *, order: FieldResult.Order
-    ) -> FieldResult: ...
+    def __call__(self, points: RayFloat3D, *, order: FieldResult.Order) -> FieldResult: ...
 
 
 class SolverFunction(Protocol):

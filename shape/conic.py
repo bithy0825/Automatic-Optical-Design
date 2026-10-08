@@ -1,6 +1,7 @@
-from typing import Any, Self, override
+"""圆锥曲面（椭球 / 抛物面 / 双曲面）。"""
+
 from collections.abc import Mapping
-import warnings
+from typing import Any, Self, override
 
 import torch
 
@@ -9,14 +10,10 @@ from core import (
     SystemBoolScalar,
     SystemFloatScalar,
     init_param,
-    term,
     parse_param,
+    term,
 )
-from implicit import (
-    NewtonSolverOptions,
-    SagFunction,
-    conical_sag,
-)
+from implicit import NewtonSolverOptions, SagFunction, conical_sag
 from shape.protocol import Shape
 
 
@@ -34,26 +31,9 @@ class Conic(Shape):
         trainable: Mapping[str, bool] | None = None,
     ):
         super().__init__(diameter, solver_opts=solver_opts, trainable=trainable)
-
-        train_C = False
-        train_K = False
-        for k in self.trainable:
-            if (
-                not term.CURVATURE.match(k)
-                and not term.KAPPA.match(k)
-                and not term.DIAMETER.match(k)
-            ):
-                warnings.warn(
-                    f"Unknown trainable key: {k}. Only 'curvature', 'kappa' and 'diameter' are supported for Conic."
-                )
-            else:
-                if term.CURVATURE.match(k):
-                    train_C = self.trainable[k]
-                if term.KAPPA.match(k):
-                    train_K = self.trainable[k]
-
-        self.Curvature = init_param(self, term.CURVATURE, curvature, train_C)
-        self.Kappa = init_param(self, term.KAPPA, kappa, train_K)
+        flags = self._train_flags(term.CURVATURE, term.KAPPA)
+        self.Curvature = init_param(self, term.CURVATURE, curvature, flags[term.CURVATURE])
+        self.Kappa = init_param(self, term.KAPPA, kappa, flags[term.KAPPA])
 
     @override
     def sag(self) -> SagFunction:

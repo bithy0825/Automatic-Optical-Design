@@ -1,20 +1,16 @@
-from typing import Any, Self, override
+"""光阑：只拦截光线的面形包装（不折射、不改介质、方向不变）。"""
+
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Any, Self, override
 
-from core import (
-    OpticalModule,
-    SystemBoolScalar,
-    SystemLongScalar,
-    TraceFlow,
-    term,
-)
 from component.protocol import Component
+from core import OpticalModule, SystemBoolScalar, SystemLongScalar, TraceFlow, term
 from shape import Shape
 
 
 class Stop(Component):
-    """光阑：一个 Shape（通常平面 Disk），只拦截光线（不折射、不改介质、方向不变）。
+    """光阑：一个 Shape（通常平面 Disk），只拦截光线。
 
     开口内（r ≤ D/2）的光线存活并原样穿过；开口外判死 ``APERTURE_CLIP``。
     求解器选项、可训练性与变异规则全部由面形配置驱动——前置光阑（与光源

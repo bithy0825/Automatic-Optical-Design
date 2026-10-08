@@ -1,6 +1,13 @@
-from dataclasses import dataclass
+"""迭代求解器：Newton / Halley 沿光线求隐式曲面交点距离。
+
+两阶段结构：前 N−1 步在 ``no_grad`` 下把 distances 推近终值（无裁决意义，
+不建图省显存）；末步带梯度推进并对最终命中点纯评估一次，使
+``distances`` / ``value`` / ``verdict`` 严格同点。
+"""
+
+from collections.abc import Callable
 from functools import partial
-from typing import Final, Protocol, cast
+from typing import Final, cast
 
 import torch
 
@@ -15,67 +22,38 @@ from implicit.protocol import (
     SolverResult,
 )
 
-
-@dataclass(frozen=True, slots=True)
-class _StepResult:
-    _delta: RayFloatScalar
-    _value: RayFloatScalar
-    _verdict: Verdict
-
-    @property
-    def delta(self) -> RayFloatScalar:
-        return self._delta
-
-    @property
-    def value(self) -> RayFloatScalar:
-        return self._value
-
-    @property
-    def verdict(self) -> Verdict:
-        return self._verdict
+type _StepFunction = Callable[
+    [RayFloatScalar, RayFloat3D, RayFloat3D, ImplicitFunction], RayFloatScalar
+]
 
 
-class _StepFunction(Protocol):
-    def __call__(
-        self,
-        distances: RayFloatScalar,
-        points: RayFloat3D,
-        directions: RayFloat3D,
-        implicit: ImplicitFunction,
-    ) -> _StepResult: ...
-
-
-def _evaluate(
+def _step(
     distances: RayFloatScalar,
     points: RayFloat3D,
     directions: RayFloat3D,
     implicit: ImplicitFunction,
     *,
     order: FieldResult.Order,
-) -> _StepResult:
-    """沿光线推进 *distances*，在命中点评估隐式函数并装配一步的结果。
+) -> RayFloatScalar:
+    """沿光线推进 *distances*，在命中点评估隐式函数并返回单步位移。
 
     ``order=GRADIENT`` 走 Newton（一阶），``order=HESSIAN`` 走 Halley（三阶）；
-    两者共用本函数，仅在步长公式上分叉，``verdict`` 一律取该命中点的隐式裁决。
+    两者共用本函数，仅在步长公式上分叉。
     """
-    points_at_t = points.add(directions.mul(distances.unsqueeze(-1)))
-    r = implicit(points_at_t, order=order)
+    r = implicit(points.add(directions.mul(distances.unsqueeze(-1))), order=order)
 
     f = r.value
-    f_prime = r.gradient.mul(directions).sum(dim=-1)
+    f_prime = r.grad().mul(directions).sum(dim=-1)
 
     if order >= FieldResult.Order.HESSIAN:
-        hess_dot_dir = torch.einsum("...ij,...j->...i", r.hessian, directions)
+        hess_dot_dir = torch.einsum("...ij,...j->...i", r.hess(), directions)
         f_double_prime = hess_dot_dir.mul(directions).sum(dim=-1)
         # 真 Halley：三阶收敛，每步仅需求一个 Hessian。
-        delta = sturdy_div(
+        return sturdy_div(
             f_prime.mul(f).mul(2.0),
             f_prime.square().mul(2.0).sub(f.mul(f_double_prime)),
         )
-    else:
-        delta = sturdy_div(f, f_prime)
-
-    return _StepResult(_delta=delta, _value=f, _verdict=r.verdict)
+    return sturdy_div(f, f_prime)
 
 
 def newton_step(
@@ -83,11 +61,9 @@ def newton_step(
     points: RayFloat3D,
     directions: RayFloat3D,
     implicit: ImplicitFunction,
-) -> _StepResult:
-    """Newton 单步（一阶收敛，``order=GRADIENT``）。"""
-    return _evaluate(
-        distances, points, directions, implicit, order=FieldResult.Order.GRADIENT
-    )
+) -> RayFloatScalar:
+    """Newton 单步位移（一阶收敛，``order=GRADIENT``）。"""
+    return _step(distances, points, directions, implicit, order=FieldResult.Order.GRADIENT)
 
 
 def halley_step(
@@ -95,11 +71,9 @@ def halley_step(
     points: RayFloat3D,
     directions: RayFloat3D,
     implicit: ImplicitFunction,
-) -> _StepResult:
-    """Halley 单步（三阶收敛，``order=HESSIAN``，每步需求一个 Hessian）。"""
-    return _evaluate(
-        distances, points, directions, implicit, order=FieldResult.Order.HESSIAN
-    )
+) -> RayFloatScalar:
+    """Halley 单步位移（三阶收敛，``order=HESSIAN``，每步需求一个 Hessian）。"""
+    return _step(distances, points, directions, implicit, order=FieldResult.Order.HESSIAN)
 
 
 def _solve(
@@ -110,23 +84,21 @@ def _solve(
     options: NewtonSolverOptions,
     step_fn: _StepFunction,
 ) -> SolverResult:
-    distances = guess(
-        points, directions, implicit=implicit, init_method=options.init_method
-    )
+    distances = guess(points, directions, implicit=implicit, init_method=options.init_method)
 
     # 推进阶段：前 N-1 步无裁决意义，全程 no_grad 只把 distances 推近终值。
     # 推进链不夹负值——distances 的正负与梯度都诚实保留，clamp/判死交给裁决阶段。
     with torch.no_grad():
         for _ in range(options.num_iter - 1):
-            step = step_fn(distances, points, directions, implicit)
-            distances = distances.sub(step.delta.mul(options.damping))
+            delta = step_fn(distances, points, directions, implicit)
+            distances = distances.sub(delta.mul(options.damping))
 
     # 最后一步带梯度推进：distances 在此建立对曲面参数（经 implicit 的 c/κ/α）
     # 的梯度链——像差损失/死亡损失反向传播所必需。仅展开最后一步既稳定又够用。
-    step = step_fn(distances, points, directions, implicit)
-    distances = distances.sub(step.delta.mul(options.damping))
+    delta = step_fn(distances, points, directions, implicit)
+    distances = distances.sub(delta.mul(options.damping))
 
-    # 裁决阶段：在最终 distances 上纯评估（带梯度），使 _distances/_value/_verdict
+    # 裁决阶段：在最终 distances 上纯评估（带梯度），使 distances/value/verdict
     # 严格同点。step 评估于更新前的点，不可直接拿来裁决。
     hit = points.add(directions.mul(distances.unsqueeze(-1)))
     r = implicit(hit, order=FieldResult.Order.VALUE)
@@ -157,37 +129,34 @@ def _solve(
     )
 
     return SolverResult(
-        _value=r.value,
-        _distances=distances,
-        _verdict=r.verdict.at(negative).at(convergence),
+        distances=distances,
+        value=r.value,
+        verdict=r.verdict.at(negative).at(convergence),
     )
 
 
-# 求解方法 → 单步步长函数。options 由 _solve 整体读取，
-# 避免对 slots dataclass 做脆弱的字段拆解；分派按枚举值而非选项类型，
-# 子类化 NewtonSolverOptions 不会破坏分派。
+# 求解方法 → 单步位移函数。options 由 _solve 整体读取，避免对 slots dataclass
+# 做脆弱的字段拆解；分派按枚举值而非选项类型，子类化 NewtonSolverOptions
+# 不会破坏分派。
 _STEP_OF: Final[dict[NewtonSolverOptions.Method, _StepFunction]] = {
     NewtonSolverOptions.Method.NEWTON: newton_step,
     NewtonSolverOptions.Method.HALLEY: halley_step,
 }
 
+_OPTIONS_OF: Final[dict[NewtonSolverOptions.Method, type[NewtonSolverOptions]]] = {
+    NewtonSolverOptions.Method.NEWTON: NewtonSolverOptions,
+    NewtonSolverOptions.Method.HALLEY: HalleySolverOptions,
+}
+
 
 def make_solver_options(**kwargs) -> NewtonSolverOptions:
-    """按 ``method`` 分派求解器选项类型，返回一个 dataclass 实例。"""
-    method = term.METHOD.resolve(kwargs, default="newton")
+    """按 ``method`` 键分派选项类型，其余键经 ``update`` 透传字段更新。"""
+    method = NewtonSolverOptions.Method(term.METHOD.resolve(kwargs, default="newton"))
     kwargs = {k: v for k, v in kwargs.items() if k not in term.METHOD}
-    if method == NewtonSolverOptions.Method.NEWTON:
-        return NewtonSolverOptions().update(**kwargs)
-    elif method == NewtonSolverOptions.Method.HALLEY:
-        return HalleySolverOptions().update(**kwargs)
-    else:
-        raise ValueError(f"Unknown solve method: {method}") from None
+    return _OPTIONS_OF[method]().update(**kwargs)
 
 
 def solve(options: NewtonSolverOptions) -> SolverFunction:
     """按 ``options.method`` 分派单步格式，返回整体求解闭包。"""
-    try:
-        step_fn = _STEP_OF[options.method]
-    except KeyError:
-        raise ValueError(f"Unknown solve method: {options.method}") from None
+    step_fn = _STEP_OF[NewtonSolverOptions.Method(options.method)]
     return cast(SolverFunction, partial(_solve, options=options, step_fn=step_fn))

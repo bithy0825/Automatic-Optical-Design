@@ -1,7 +1,15 @@
+"""矢高函数：横向 (x, y) → 矢高 z 及其导数（球面 / 圆锥 / 偶次非球面 / 平面）。
+
+所有矢高在定义域外（radicand < 0）退化为零而非外推，生死由
+:class:`~core.flow.Verdict` 诚实标记——这是损失面光滑化的根基。
+"""
+
 import torch
 
 from core import (
     RayFloat2D,
+    RayFloatMatrix2D,
+    RayFloatScalar,
     SystemFloatND,
     SystemFloatScalar,
     Verdict,
@@ -9,10 +17,22 @@ from core import (
     sturdy_div,
     sturdy_sqrt,
 )
-from implicit._tensor_utils import _broadcast_coeff, _sym2x2
 from implicit.protocol import FieldResult, SagFunction
 
 _Order = FieldResult.Order
+
+
+def _sym2x2(d00: RayFloatScalar, off01: RayFloatScalar, d11: RayFloatScalar) -> RayFloatMatrix2D:
+    """组装对称 2×2 矩阵 ``[[d00, off01], [off01, d11]]``（逐光线）。"""
+    row0 = torch.stack((d00, off01), dim=-1)
+    row1 = torch.stack((off01, d11), dim=-1)
+    return torch.stack((row0, row1), dim=-2)
+
+
+def _broadcast_coeff(coeff: torch.Tensor, ray_scalar: RayFloatScalar) -> torch.Tensor:
+    """把逐个体系数 ``(P, Ncoeff)`` 广播对齐到光线维 ``(P, F, W, N, Ncoeff)``。"""
+    new_shape = (coeff.shape[0], 1, 1, 1, coeff.shape[-1])
+    return coeff.reshape(new_shape).expand(*ray_scalar.shape, coeff.shape[-1]).to(ray_scalar.dtype)
 
 
 def _conic_core(
@@ -56,11 +76,8 @@ def _conic_core(
             g_yy = radicand.add(c2k.mul(y.square())).mul(hess_scale)
             hess = _sym2x2(g_xx, g_xy, g_yy)
 
-        verdict = Verdict.site(
-            hold=in_domain, toll=radicand, cause=Verdict.Cause.SAG_DOMAIN
-        )
-
-        return FieldResult(_value=val, _verdict=verdict, _gradient=grad, _hessian=hess)
+        verdict = Verdict.site(hold=in_domain, toll=radicand, cause=Verdict.Cause.SAG_DOMAIN)
+        return FieldResult(value=val, verdict=verdict, gradient=grad, hessian=hess)
 
     return sag
 
@@ -75,12 +92,9 @@ def conical_sag(
     curvature: SystemFloatScalar,
     kappa: SystemFloatScalar,
 ) -> SagFunction:
-    """标准圆锥曲面矢高。
+    """标准圆锥曲面矢高：``c`` 曲率、``κ`` 圆锥常数（``(P,)``）。
 
-    Args:
-        curvature: 曲率 ``c``，形状 ``[P]``。
-        kappa: 圆锥常数 ``κ``，形状 ``[P]``。``κ=0`` 退化为球面、``κ=1`` 抛物面、
-            ``κ∈(-1,0)`` 椭球、``κ<-1`` 双曲面。
+    ``κ=0`` 退化为球面、``κ=1`` 抛物面、``κ∈(-1,0)`` 椭球、``κ<-1`` 双曲面。
     """
     return _conic_core(curvature, kappa)
 
@@ -93,17 +107,11 @@ def aspheric_sag(
 ) -> SagFunction:
     """圆锥基底 + 偶次非球面多项式矢高。
 
-    ``z(r) = z_conic(r) + Σ_i α_i·(r/ρ)^(4+2i)``，其中 *ρ* 为归一化半径。
-    先计算 ``u = r²/ρ²`` 再对 *u* 取幂，避免大半径高次幂的数值溢出。
+    ``z(r) = z_conic(r) + Σ_i α_i·(r/ρ)^(4+2i)``，其中 *ρ* 为归一化半径；
+    *alpha* 形状 ``(P, Ncoeff)``（已缩放至统一数量级）。先计算
+    ``u = r²/ρ²`` 再对 *u* 取幂，避免大半径高次幂的数值溢出。
     归一化域过滤由外界负责，此处不做重复裁决。
-
-    Args:
-        curvature: 曲率 ``c``，形状 ``[P]``。
-        kappa: 圆锥常数 ``κ``，形状 ``[P]``。
-        alpha: 多项式系数，形状 ``[P, Ncoeff]``（已缩放至统一数量级）。
-        normalization: 归一化半径 *ρ*，形状 ``[P]``。
     """
-
     conic_fn = _conic_core(curvature, kappa)
 
     # 小指数张量预算一次（闭包随 forward 每次重建，dtype/device 跟随当前参数）
@@ -138,27 +146,23 @@ def aspheric_sag(
             # T = 2·ds/d(r²) = Σ α_n·(4+2n)·u^(1+n) / ρ²
             T = alpha_b.mul(c1).mul(u_e.pow(p1)).sum(dim=-1).div(rho_sq).mul(valid)
             grad_poly = torch.stack((x.mul(T), y.mul(T)), dim=-1)
-            grad = conic.gradient.add(grad_poly)
+            grad = conic.grad().add(grad_poly)
 
             if order >= _Order.HESSIAN:
                 # T' = dT/d(r²) = Σ α_n·(4+2n)(1+n)·u^n / ρ⁴
                 Tprime = (
-                    alpha_b.mul(c12)
-                    .mul(u_e.pow(i))
-                    .sum(dim=-1)
-                    .div(rho_sq.square())
-                    .mul(valid)
+                    alpha_b.mul(c12).mul(u_e.pow(i)).sum(dim=-1).div(rho_sq.square()).mul(valid)
                 )
                 xx = T.add(x.square().mul(Tprime).mul(2.0))
                 xy = x.mul(y).mul(Tprime).mul(2.0)
                 yy = T.add(y.square().mul(Tprime).mul(2.0))
-                hess = conic.hessian.add(_sym2x2(xx, xy, yy))
+                hess = conic.hess().add(_sym2x2(xx, xy, yy))
 
         return FieldResult(
-            _value=conic.value.add(sag_poly),
-            _verdict=conic.verdict,
-            _gradient=grad,
-            _hessian=hess,
+            value=conic.value.add(sag_poly),
+            verdict=conic.verdict,
+            gradient=grad,
+            hessian=hess,
         )
 
     return sag_fn
@@ -177,15 +181,13 @@ def flat_sag() -> SagFunction:
 
         hess = None
         if order >= _Order.HESSIAN:
-            hess = torch.zeros(
-                *points.shape[:-1], 2, 2, dtype=points.dtype, device=points.device
-            )
+            hess = torch.zeros(*points.shape[:-1], 2, 2, dtype=points.dtype, device=points.device)
 
         return FieldResult(
-            _value=val,
-            _verdict=Verdict.alive_like(x),
-            _gradient=grad,
-            _hessian=hess,
+            value=val,
+            verdict=Verdict.alive_like(x),
+            gradient=grad,
+            hessian=hess,
         )
 
     return sag_fn
