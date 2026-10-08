@@ -62,6 +62,9 @@ class Pose:
 
     平移在注入点的名义局部系内度量；倾斜转轴过（位移后的）面顶点；
     长度单位 mm，角度单位 rad。小角度下因子次序无关。
+
+    五个分量全 ``None``（恒等扰动）会在 :func:`~perturb.inject.build_callback`
+    时报错——空声明基本是配置笔误，不允许静默通过。
     """
 
     first: int
