@@ -46,6 +46,13 @@ class Gap(Component):
         self.Thickness = init_param(self, term.THICKNESS, value, trainable)
 
     @override
+    def scale_(self, factor: float) -> None:
+        """间隔厚度 ×s（光线与裁决语义不受影响）。"""
+        if factor <= 0:
+            raise ValueError(f"scale factor must be positive, got {factor}")
+        self.Thickness.mul_(factor)
+
+    @override
     def forward(self, flow: TraceFlow) -> TraceFlow:
         tf = flow.transformer
         t = self.Thickness.to(device=tf.device, dtype=tf.dtype)
@@ -66,7 +73,9 @@ class Gap(Component):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """逐个体选择厚度，trainable 语义从 *new* 继承。"""
         OpticalModule._check_operands(mask, new, old)
         return cls(

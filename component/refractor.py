@@ -50,6 +50,11 @@ class Refractor(Component):
         self.incident = MaterialRef.from_material(transmitted_prev)
 
     @override
+    def scale_(self, factor: float) -> None:
+        """面形缩放委托给 shape；材料为无量纲折射率，不缩放。"""
+        self.shape.scale_(factor)
+
+    @override
     def forward(self, flow: TraceFlow) -> TraceFlow:
         """求交 → Snell 折射 → 推进光线；裁决沿流链入（上游已死光线保持死亡）。"""
         if self.incident is None:
@@ -87,7 +92,9 @@ class Refractor(Component):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """shape 多态分派、transmitted 经 ``Material.where`` 合并；
         ``incident`` 留空，由链式容器 rebind（语义同 ``clone``）。"""
         OpticalModule._check_operands(mask, new, old)

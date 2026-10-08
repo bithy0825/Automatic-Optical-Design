@@ -40,6 +40,12 @@ class Conic(Shape):
         return conical_sag(self.Curvature, self.Kappa)
 
     @override
+    def scale_(self, factor: float) -> None:
+        """直径 ×s、曲率 ÷s；圆锥系数 k 无量纲不缩放。"""
+        super().scale_(factor)
+        self.Curvature.div_(factor)
+
+    @override
     def clone(self) -> Self:
         return type(self)(
             diameter=self.Diameter.clone(),
@@ -51,7 +57,9 @@ class Conic(Shape):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """逐个体选择直径、曲率与锥面常数；求解器与 trainable 配置从 *new* 继承。"""
         OpticalModule._check_operands(mask, new, old)
         return cls(

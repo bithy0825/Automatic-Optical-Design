@@ -114,7 +114,9 @@ class Sequential(Component):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """逐元件多态分派各自的 ``where``（命中子类实现或基类默认），随后 rebind。"""
         OpticalModule._check_operands(mask, new, old)
         components: list[Component] = []
@@ -125,6 +127,32 @@ class Sequential(Component):
         seq = cls(*components)
         seq.rebind()
         return cast(Self, seq)
+
+    @override
+    def select(self, indices: int | Sequence[int]) -> Self:
+        """逐元件分派各自的 ``select``（聚合层只分派），随后 rebind。
+
+        校验与切片语义见基类默认实现（:meth:`OpticalModule.select`）；
+        索引按原链 P 维解释，可重复、可乱序，必定返回新链。
+        """
+        seq = type(self)(*(comp.select(indices) for comp in self))
+        seq.rebind()
+        return cast(Self, seq)
+
+    @override
+    def scale_(self, factor: float) -> None:
+        """逐元件分派各自的 ``scale_``（聚合层只分派，不直接碰参数）。
+
+        物理坐标 (r, z) → (s·r, s·z) 的相似变换：f/#、NA、波长、材料、
+        视场角不变；几何像差随 s 线性缩放，衍射爱里斑不变。各面位置由
+        Gap 级联自然跟随；``Transformer`` 是刚体位姿、不含缩放，缩放必须
+        改写元件参数。光源 ``epd`` 是种群共享标量——逐个体不同缩放须先用
+        :meth:`select` 切片为 P=1。
+        """
+        if factor <= 0:
+            raise ValueError(f"scale factor must be positive, got {factor}")
+        for comp in self:
+            comp.scale_(factor)
 
     @override
     def clone(self) -> Self:

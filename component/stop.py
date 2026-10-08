@@ -28,6 +28,11 @@ class Stop(Component):
         self.shape = shape
 
     @override
+    def scale_(self, factor: float) -> None:
+        """开口缩放委托给 shape。"""
+        self.shape.scale_(factor)
+
+    @override
     def forward(self, flow: TraceFlow) -> TraceFlow:
         """求交 → 光线推进到光阑面，孔径裁决沿流链入（方向不变）。"""
         hit = self.shape(flow.rays.points, flow.rays.directions, flow.transformer)
@@ -47,7 +52,9 @@ class Stop(Component):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """面形多态分派各自的 ``where``（语义同 Refractor）。"""
         OpticalModule._check_operands(mask, new, old)
         if type(new.shape) is not type(old.shape):

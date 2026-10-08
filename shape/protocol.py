@@ -96,6 +96,16 @@ class Shape(OpticalModule, ABC):
     def sag(self) -> SagFunction:
         """矢高函数（每次调用重建，确保读到当前参数）。"""
 
+    def scale_(self, factor: float) -> None:
+        """Zemax 式缩放（原地）：机械直径 ×factor。
+
+        长度量纲的子类参数（曲率、非球面系数等）由子类覆盖扩展；
+        无量纲参数（圆锥系数 k、mask 计数）不缩放。
+        """
+        if factor <= 0:
+            raise ValueError(f"scale factor must be positive, got {factor}")
+        self.Diameter.mul_(factor)
+
     def aperture(self) -> ApertureFunction:
         """机械孔径函数：默认圆形 ``Diameter / 2``，特殊孔径才覆盖。"""
         return circle_aperture(self.Diameter.mul(0.5))

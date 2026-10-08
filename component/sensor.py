@@ -27,6 +27,11 @@ class Sensor(Component):
         self.shape = shape
 
     @override
+    def scale_(self, factor: float) -> None:
+        """传感面缩放委托给 shape（落面位置由上游 Gap 级联跟随）。"""
+        self.shape.scale_(factor)
+
+    @override
     def forward(self, flow: TraceFlow) -> TraceFlow:
         """求交 → 光线落在传感面上，孔径裁决沿流链入。"""
         hit = self.shape(flow.rays.points, flow.rays.directions, flow.transformer)
@@ -41,7 +46,9 @@ class Sensor(Component):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """面形多态分派各自的 ``where``（语义同 Refractor）。"""
         OpticalModule._check_operands(mask, new, old)
         if type(new.shape) is not type(old.shape):

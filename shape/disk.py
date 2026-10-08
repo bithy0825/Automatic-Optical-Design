@@ -37,7 +37,9 @@ class Disk(Shape):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """逐个体选择直径；求解器与 trainable 配置从 *new* 继承。"""
         OpticalModule._check_operands(mask, new, old)
         return cls(

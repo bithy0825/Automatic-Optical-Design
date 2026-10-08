@@ -6,7 +6,7 @@
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from itertools import chain
 from typing import Any, ClassVar, Final, Self
 
@@ -18,7 +18,17 @@ from core.noun import Noun
 from core.repr import fmt_param, render_tree, styled
 
 # 子类定义时被自动包装为 no_grad 的方法（演化操作一律不建图）
-_AUTO_NO_GRAD: Final = ("sort_", "breed_", "mutate_", "clone", "where", "where_")
+_AUTO_NO_GRAD: Final = (
+    "sort_",
+    "breed_",
+    "mutate_",
+    "clone",
+    "where",
+    "where_",
+    "select",
+    "scale",
+    "scale_",
+)
 
 
 class OpticalModule(nn.Module, ABC):
@@ -79,6 +89,48 @@ class OpticalModule(nn.Module, ABC):
         for t in self.buffers():
             return t.shape[0]
         raise RuntimeError(f"{type(self).__name__} has no batched parameters")
+
+    # ── 种群切片与缩放（where/where_ 语义：纯操作返回新对象，下划线原地） ──
+
+    @torch.no_grad()
+    def select(self, indices: int | Sequence[int]) -> Self:
+        """P 维个体切片：返回仅含指定个体的新对象（本体不被修改）。
+
+        默认实现：克隆后对所有批量张量（第 0 维 = P）``index_select``；
+        标量共享配置（如光源 ``epd`` / 视场 / 波长）原样继承。索引可重复、
+        可乱序。聚合子类（如 Sequential）覆盖为逐子模块分派。
+        """
+        if isinstance(indices, int):
+            indices = (indices,)
+        idx = torch.as_tensor(list(indices), dtype=torch.long)
+        if idx.numel() == 0:
+            raise ValueError("select: indices must be non-empty")
+        P = self.population
+        if bool(((idx < 0) | (idx >= P)).any()):
+            raise IndexError(f"select: indices out of range [0, {P}): {idx.tolist()}")
+        out = self.clone()
+        # 先收集再改写：population 随切片即时变化，生成器须提前物化
+        targets = list(out._batched_tensors())
+        for _name, t in targets:
+            t.data = t.data.index_select(0, idx.to(t.device))
+        return out
+
+    @torch.no_grad()
+    def scale(self, factor: float) -> Self:
+        """Zemax 式缩放（返回新对象，本体不被修改）：克隆 + :meth:`scale_`。"""
+        out = self.clone()
+        out.scale_(factor)
+        return out
+
+    def scale_(self, factor: float) -> None:
+        """Zemax 式缩放（原地）：所有长度量纲参数 ×factor。
+
+        物理坐标 (r, z) → (s·r, s·z) 的相似变换：f/#、NA、波长、材料、
+        视场角不变；几何像差随 s 线性缩放，衍射爱里斑不变。参数映射由各
+        子类分别实现（曲率 ÷s、直径/间隔/入瞳 ×s、非球面系数 ×s 等），
+        聚合类只逐子模块分派。
+        """
+        raise NotImplementedError(f"{type(self).__name__}.scale_ is not implemented")
 
     # ── GA 演化操作（默认实现，子类按需覆盖） ──
 

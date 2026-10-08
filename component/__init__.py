@@ -8,7 +8,8 @@
 * :mod:`component.refractor` —— 折射器（Shape + 两侧材料）。
 * :mod:`component.stop` —— 光阑（flat 面圆形开口，只拦截光线）。
 * :mod:`component.sensor` —— 像面传感器（终端元件）。
-* :mod:`component.sequential` —— 元件链（完整光学系统）。
+* :mod:`component.sequential` —— 元件链（完整光学系统，含 ``select`` /
+  ``scale`` / ``scale_`` 种群操作）。
 """
 
 from component.gap import Gap

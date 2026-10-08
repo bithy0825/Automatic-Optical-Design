@@ -63,6 +63,18 @@ class Asphere(Shape):
         return aspheric_sag(self.Curvature, self.Kappa, alpha, radius)
 
     @override
+    def scale_(self, factor: float) -> None:
+        """直径 ×s、曲率 ÷s、α ×s；kappa 无量纲、mask 为系数计数，均不缩放。
+
+        α ×s 的原因：sag 用归一化坐标 ``z = z_conic + Σα_i·(r/ρ)^(4+2i)``
+        （ρ = D/2），相似变换 (r,z) → (s·r, s·z) 下 r/ρ 不变，α 随 z
+        线性缩放（与物理坐标写法 ``A_i/s^(2i−1)`` 等价）。
+        """
+        super().scale_(factor)
+        self.Curvature.div_(factor)
+        self.Alpha.mul_(factor)
+
+    @override
     def mutate_(self, indices: SystemLongScalar, options: Mapping[str, Any]) -> None:
         self._jitter(term.ALPHA, indices, term.ALPHA.resolve(options, default=0.0))
 
@@ -114,7 +126,9 @@ class Asphere(Shape):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """逐个体选择各面形参数；``Alpha`` 为 ``(P, N)``，mask 升维广播。
         求解器与 trainable 配置从 *new* 继承。"""
         OpticalModule._check_operands(mask, new, old)

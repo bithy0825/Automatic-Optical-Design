@@ -200,6 +200,17 @@ class InfiniteSource(Component):
         yield f"transmitted: {fmt_param(self.transmitted.names())}"
 
     @override
+    def scale_(self, factor: float) -> None:
+        """入瞳直径 ×s（视场角为角度、波长为光谱量，均不缩放）。
+
+        注意 ``epd`` 是种群共享标量：逐个体不同缩放须先用
+        :meth:`~core.module.OpticalModule.select` 切片。
+        """
+        if factor <= 0:
+            raise ValueError(f"scale factor must be positive, got {factor}")
+        self.epd = self.epd * factor
+
+    @override
     def forward(self, flow: TraceFlow | None = None) -> TraceFlow:
         """发射初始光线：*flow* 缺省时新建单位变换的 TraceFlow，否则替换其光线。"""
         tf = (
@@ -283,7 +294,9 @@ class InfiniteSource(Component):
 
     @classmethod
     @override
-    def where(cls, mask: SystemBoolScalar, new: Self, old: Self) -> Self:
+    def where(  # pyright: ignore[reportIncompatibleMethodOverride] 与全仓库 where 语义一致：Self 收窄由 _check_operands 运行时守卫
+        cls, mask: SystemBoolScalar, new: Self, old: Self
+    ) -> Self:
         """照明配置（epd/视场/波长/采样）为种群共享配置，从 *new* 继承；
         唯一逐个体状态 ``transmitted`` 经 ``Material.where`` 合并。"""
         OpticalModule._check_operands(mask, new, old)

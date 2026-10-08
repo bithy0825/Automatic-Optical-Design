@@ -5,7 +5,7 @@
 经 ``_apply`` 跟随迁移（既定行为，见 :mod:`materials.protocol`）。
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Self
 
@@ -112,6 +112,38 @@ class Material(nn.Module):
         已被禁用。新 Material 持有克隆后的 indices，与其原对象互不干扰。
         """
         return Material(indices=self.Indices.clone(), database=self.database)
+
+    @torch.no_grad()
+    def select(self, indices: int | Sequence[int]) -> "Material":
+        """种群切片：返回仅含指定个体的新 Material（独立 Indices，database 单例共享）。
+
+        索引可重复、可乱序；本体不被修改（纯操作语义同 :meth:`where`）。
+        """
+        if isinstance(indices, int):
+            indices = (indices,)
+        idx = torch.as_tensor(list(indices), dtype=torch.long)
+        if idx.numel() == 0:
+            raise ValueError("select: indices must be non-empty")
+        P = self.Indices.shape[0]
+        if bool(((idx < 0) | (idx >= P)).any()):
+            raise IndexError(f"select: indices out of range [0, {P}): {idx.tolist()}")
+        return Material(
+            indices=self.Indices.index_select(0, idx.to(self.Indices.device)),
+            database=self.database,
+        )
+
+    @torch.no_grad()
+    def scale(self, factor: float) -> "Material":
+        """缩放对材料为空操作（折射率无量纲）；按纯操作契约返回新对象。"""
+        if factor <= 0:
+            raise ValueError(f"scale factor must be positive, got {factor}")
+        return self.clone()
+
+    @torch.no_grad()
+    def scale_(self, factor: float) -> None:
+        """缩放对材料为空操作（折射率无量纲）；仅校验因子合法性。"""
+        if factor <= 0:
+            raise ValueError(f"scale factor must be positive, got {factor}")
 
     @classmethod
     @torch.no_grad()
