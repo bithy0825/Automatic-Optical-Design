@@ -24,6 +24,7 @@ RayBundle 无振幅通道）；参考球半径的出瞳估计只影响采样经�
 正确性（精确距离核）；分块求和仅改变加法顺序（float64 非结合误差 ~1e-15）。
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import cast
 
@@ -58,12 +59,15 @@ def eval_chain(
     seq: Sequential,
     pupil: SampleOptions | None,
     wavelengths: tuple[float, ...] | None,
+    field: tuple[float, float] | None = None,
 ) -> Sequential:
     """评估链：disk 光瞳覆盖 + （可选）密集波长覆盖克隆 + 整体 float64。
 
     缺省 fibonacci disk 20001 点（等面积采样，每根光线权重相等）。
     rect/random 采样不含光瞳中心光线（主光线无定义），直接报错。
     波长覆盖时 ``wavel_cfg`` 重建为等数 uniform line，采样值与控制点一一对齐。
+    视场覆盖时 ``field=(fx, fy)``（deg）单点取代原视场网格（``field_cfg``
+    退化为 1 点），用于任意工况角的分析；None 保持原视场配置。
     """
     src = seq[0]
     if not isinstance(src, InfiniteSource):
@@ -79,14 +83,20 @@ def eval_chain(
     else:
         wl = tuple(float(w) for w in wavelengths)
         wavel_cfg = SampleOptions(method="uniform", region="line", count=len(wl))
+    if field is None:
+        field_x, field_y, field_cfg = src.field_x, src.field_y, src.field_cfg
+    else:
+        field_x = field_y = None  # 由下方单点覆盖
+        field_x, field_y = float(field[0]), float(field[1])
+        field_cfg = SampleOptions(method="uniform", region="rect", count=(1, 1))
     eval_src = InfiniteSource(
         epd=src.epd,
-        field_x=src.field_x,
-        field_y=src.field_y,
+        field_x=field_x,
+        field_y=field_y,
         wavelength=wl,
         population=src.population,
         pupil_cfg=cfg,
-        field_cfg=src.field_cfg,
+        field_cfg=field_cfg,
         wavel_cfg=wavel_cfg,
         transmitted=src.transmitted.clone(),
     )
@@ -95,12 +105,15 @@ def eval_chain(
     return out.to(torch.float64)
 
 
-def trace_with_opl(seq: Sequential, extra: FlowCallback | None) -> TraceSnapshot:
+def trace_with_opl(
+    seq: Sequential, extra: FlowCallback | Iterable[FlowCallback] | None
+) -> TraceSnapshot:
     """追迹评估链：callback 逐段累积 OPL（几何段长 × 当前介质折射率）。
 
     段介质 = 上游最近 Source/Refractor 的出射材料（折射面处先按旧介质
     累积到达段、再更新介质）；Gap 不移动光线，Stop 在同介质内推进。
-    *extra* 为误差注入等附加回调（先于 OPL 记账执行；记账只读当前状态）。
+    *extra* 为误差注入等附加回调（单个或可迭代；先于 OPL 记账执行，
+    记账只读当前状态）。
 
     InfiniteSource 无浮点 buffer，初始 Transformer 取进程缺省 dtype；
     追迹期间临时切换缺省为 float64（退出还原）。
@@ -141,9 +154,15 @@ def trace_with_opl(seq: Sequential, extra: FlowCallback | None) -> TraceSnapshot
 
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
+    if extra is None:
+        callbacks: FlowCallback | tuple[FlowCallback, ...] = _cb
+    elif callable(extra):
+        callbacks = (extra, _cb)
+    else:
+        callbacks = (*extra, _cb)
     try:
         with torch.no_grad():
-            seq(callback=_cb if extra is None else (extra, _cb))
+            seq(callback=callbacks)
     finally:
         torch.set_default_dtype(prev_dtype)
     if not terminal:

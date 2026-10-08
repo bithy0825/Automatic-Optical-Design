@@ -1,6 +1,6 @@
 """派生像质指标：MTF / 波前误差 / Strehl 比（同一内核输出的纯后处理）。
 
-全部指标消费 :class:`~analysis.psf.PsfResult`，不重复追迹。
+全部指标消费 :class:`~analysis.psf.PsfReport`，不重复追迹。
 """
 
 import math
@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from analysis._kernel import _NM_TO_MM
-from analysis.psf import PsfResult
+from analysis.psf import PsfReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,7 @@ class MtfResult:
     freqs: Tensor  # (H,) cycles/mm（fftshift 对齐）
 
 
-def mtf(res: PsfResult) -> MtfResult:
+def mtf(res: PsfReport) -> MtfResult:
     """MTF：``|FFT(psf)|``（psf 已 Σ=1 归一，故 OTF(0)=1 约定自动满足）。"""
     otf = torch.fft.fft2(res.psf)
     m = torch.fft.fftshift(otf.abs(), dim=(-2, -1))
@@ -37,7 +37,7 @@ class WavefrontResult:
     ptv: Tensor  # (P,F,W)
 
 
-def wavefront(res: PsfResult) -> WavefrontResult:
+def wavefront(res: PsfReport) -> WavefrontResult:
     """波前误差：存活光线 OPD 的 RMS 与峰谷值（等面积采样 → 等权）。"""
     opd, alive = res.opd, res.alive
     n = alive.sum(dim=-1)
@@ -55,7 +55,7 @@ def wavefront(res: PsfResult) -> WavefrontResult:
     return WavefrontResult(rms=rms, ptv=ptv)
 
 
-def strehl(res: PsfResult) -> Tensor:
+def strehl(res: PsfReport) -> Tensor:
     """Marechal 近似 Strehl 比：``exp(−(2πσ/λ)²)``，σ 为 OPD RMS。(P,F,W)"""
     sigma = wavefront(res).rms
     lam_mm = res.wavelengths * _NM_TO_MM  # (W,)
