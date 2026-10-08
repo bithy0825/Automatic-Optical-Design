@@ -15,13 +15,13 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Self, TypeAlias
+from typing import Any, Self
 
 import torch
 
 from core import parse_param, term
 
-Spec: TypeAlias = float | int | torch.Tensor | Mapping[str, Any] | None
+type Spec = float | int | torch.Tensor | Mapping[str, Any] | None
 
 
 def _materialize(
@@ -36,8 +36,7 @@ def _materialize(
             return t.expand(population)
         if t.ndim != 1 or t.shape[0] != population:
             raise ValueError(
-                f"Error spec tensor must be scalar or ({population},), "
-                f"got shape={tuple(t.shape)}"
+                f"error spec tensor must be scalar or ({population},), got shape={tuple(t.shape)}"
             )
         return t
     if isinstance(spec, (int, float)):
@@ -47,7 +46,7 @@ def _materialize(
         return parse_param({"spec": {"mean": 0.0, **spec}}, "spec", population).to(
             device=device, dtype=dtype
         )
-    raise TypeError(f"Unsupported error spec: {type(spec)}")
+    raise TypeError(f"unsupported error spec: {type(spec)}")
 
 
 @dataclass(frozen=True)
@@ -75,6 +74,7 @@ class Pose:
 
     @classmethod
     def from_options(cls, options: Mapping[str, Any]) -> Self:
+        """从配置映射构造（``first`` 必填，其余缺省为恒零）。"""
         last = term.LAST.resolve(options, default=None)
         return cls(
             first=int(term.FIRST.resolve(options)),
@@ -143,6 +143,5 @@ def from_options(options: Mapping[str, Any]) -> Pose | Scatter | Clip:
         if kind in noun:
             return cls.from_options(options)
     raise ValueError(
-        f"Unknown perturb type: {kind!r} "
-        f"(available: {[n.canonical for n, _ in _KINDS]})"
+        f"unknown perturb type: {kind!r} (available: {[n.canonical for n, _ in _KINDS]})"
     )

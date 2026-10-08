@@ -17,19 +17,12 @@ from typing import Any, cast
 import torch
 import torch.nn.functional as F
 
-from component import Refractor, Sensor, Sequential, Stop
-from component.sequential import FlowCallback
-from core import (
-    TraceFlow,
-    Transformer,
-    Verdict,
-    broadcast_system_to_ray,
-    sturdy_div,
-)
+from component import FlowCallback, Refractor, Sensor, Sequential, Stop
+from core import TraceFlow, Transformer, Verdict, broadcast_system_to_ray, sturdy_div
 from perturb.error import Clip, Pose, Scatter, _materialize
 from perturb.error import from_options as _parse_error
 
-ErrorLike = Pose | Scatter | Clip | Mapping[str, Any]
+type ErrorLike = Pose | Scatter | Clip | Mapping[str, Any]
 
 
 def _surface_indices(seq: Sequential) -> list[int]:
@@ -38,7 +31,8 @@ def _surface_indices(seq: Sequential) -> list[int]:
 
 
 def _nominal_poses(seq: Sequential) -> list[Transformer]:
-    """无扰动探测追迹：逐站点名义位姿（dtype 钉扎约定同 trace_layout）。"""
+    """无扰动探测追迹：逐站点名义位姿（dtype 钉扎：InfiniteSource 无浮点
+    buffer，其初始 Transformer 取进程缺省 dtype，探测期间临时对齐 seq）。"""
     poses: list[Transformer] = []
 
     def _cb(_comp: object, flow: TraceFlow, _i: int) -> TraceFlow:
@@ -59,7 +53,10 @@ def _delta(
     spec: Pose, population: int, *, device: torch.device, dtype: torch.dtype
 ) -> Transformer | None:
     """Δ = T(dx,dy,dz)·Rx(α)·Ry(β) 逐个体批量构造；字段全 None（恒等）返回 None。"""
-    mat = lambda s: _materialize(s, population, device=device, dtype=dtype)
+
+    def mat(s) -> torch.Tensor:
+        return _materialize(s, population, device=device, dtype=dtype)
+
     delta: Transformer | None = None
     if (spec.dx, spec.dy, spec.dz) != (None, None, None):
         d = torch.stack((mat(spec.dx), mat(spec.dy), mat(spec.dz)), dim=-1)
@@ -106,19 +103,15 @@ def build_callback(seq: Sequential, errors: Iterable[ErrorLike]) -> FlowCallback
 
     Args:
         seq: 光学系统（提供 population / device / dtype 与站点结构）。
-        errors: 误差声明序列（``:class:`Pose`/:class:`Scatter`/:class:`Clip```
+        errors: 误差声明序列（:class:`Pose` / :class:`Scatter` / :class:`Clip`
             实例或配置映射，映射按 ``type`` 键分派）。空序列返回恒等回调。
             分布映射在此刻采样一次；重采 = 重新 build。
 
     面号为 1 起的光学面序号（见 :mod:`perturb.error`）。多个 Pose 区间
     重叠时，同一站点上的 Δ 按声明顺序依次右乘。
     """
-    blocks = cast(
-        Iterable[ErrorLike], (errors,) if isinstance(errors, Mapping) else errors
-    )
-    errs = tuple(
-        e if isinstance(e, (Pose, Scatter, Clip)) else _parse_error(e) for e in blocks
-    )
+    blocks = cast(Iterable[ErrorLike], (errors,) if isinstance(errors, Mapping) else errors)
+    errs = tuple(e if isinstance(e, (Pose, Scatter, Clip)) else _parse_error(e) for e in blocks)
     if not errs:
         return lambda _comp, flow, _i: flow
 
@@ -131,9 +124,7 @@ def build_callback(seq: Sequential, errors: Iterable[ErrorLike]) -> FlowCallback
             raise ValueError(f"surface {k} out of range [1, {n_surf}]")
         return surf[k - 1]
 
-    pose_items: list[
-        tuple[int, int | None, Transformer]
-    ] = []  # (首元件, 末元件|None, Δ)
+    pose_items: list[tuple[int, int | None, Transformer]] = []  # (首元件, 末元件|None, Δ)
     scatter_at: dict[int, torch.Tensor] = {}  # 站点 → 角噪声 std (P,)
     clip_at: list[tuple[int | None, torch.Tensor]] = []  # (站点|None, 半径 (P,))
     for e in errs:
@@ -141,7 +132,7 @@ def build_callback(seq: Sequential, errors: Iterable[ErrorLike]) -> FlowCallback
             first_c = _check_surface(e.first)
             last_c = None if e.last is None else _check_surface(e.last)
             if last_c is not None and last_c < first_c:
-                raise ValueError(f"Pose interval [{e.first}, {e.last}] is empty")
+                raise ValueError(f"pose interval [{e.first}, {e.last}] is empty")
             d = _delta(e, P, device=device, dtype=dtype)
             if d is not None:
                 pose_items.append((first_c, last_c, d))

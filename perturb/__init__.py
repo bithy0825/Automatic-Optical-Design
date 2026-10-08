@@ -11,11 +11,19 @@
 
 用法::
 
+    from perturb import build_callback
+
     cb = build_callback(seq, [
-        Pose(first=3, last=4, dx={"method": "normal", "std": 0.01}),
-        Clip(radius=12.0),
+        {"type": "pose", "first": 3, "last": 4, "dx": {"method": "normal", "std": 0.01}},
+        {"type": "scatter", "surface": 2, "std": 1e-4},
+        {"type": "clip", "radius": 12.0},
     ])
-    flow = seq(callback=cb)   # 一次前向 = 整个蒙特卡洛种群
+    flow = seq(callback=cb)   # 种群维即蒙特卡洛维
+
+模块组织
+--------
+* :mod:`perturb.error` —— 误差声明（纯数据规格 + 配置解析）。
+* :mod:`perturb.inject` —— 误差声明 → 追迹回调的编译。
 """
 
 from perturb.error import Clip, Pose, Scatter, from_options
