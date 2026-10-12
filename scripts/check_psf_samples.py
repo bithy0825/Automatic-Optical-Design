@@ -71,14 +71,17 @@ def main() -> None:
         # 4
         if r["perturb"] == "none":
             if r["coverage"] < r["tau_j"] - 5e-3:
-                fails.append(f"{tag}: 干净样本 coverage {r['coverage']:.4f} < tau_j {r['tau_j']:.4f}")
+                fails.append(
+                    f"{tag}: 干净样本 coverage {r['coverage']:.4f} < tau_j {r['tau_j']:.4f}"
+                )
         elif isinstance(r["perturb"], dict) and r["coverage"] < 0.70 - 1e-6:
             fails.append(f"{tag}: 扰动样本 coverage {r['coverage']:.4f} < 0.70")
         # 5（仅轴上干净：质心应在半像素内）
         if r["bins"]["radial"] == -1 and r["perturb"] == "none":
             g = img[:, :, 1].double()
             yy, xx = torch.meshgrid(
-                torch.arange(64, dtype=torch.float64), torch.arange(64, dtype=torch.float64),
+                torch.arange(64, dtype=torch.float64),
+                torch.arange(64, dtype=torch.float64),
                 indexing="ij",
             )
             cy = float((g * yy).sum() / g.sum())
@@ -95,14 +98,22 @@ def main() -> None:
             if r["bins"]["radial"] == j and r["perturb"] == "none"
         ]
         if es:
-            print(f"  r{j}: n={len(es):2d}  mean={sum(es)/len(es):.4f}  range=({min(es):.4f},{max(es):.4f})")
+            print(
+                f"  r{j}: n={len(es):2d}  mean={sum(es) / len(es):.4f}  range=({min(es):.4f},{max(es):.4f})"
+            )
 
     # 扰动/相机统计
     from collections import Counter
 
-    print("扰动:", dict(Counter(
-        r["perturb"] if isinstance(r["perturb"], str) else r["perturb"]["kind"] for r in kept
-    )))
+    print(
+        "扰动:",
+        dict(
+            Counter(
+                r["perturb"] if isinstance(r["perturb"], str) else r["perturb"]["kind"]
+                for r in kept
+            )
+        ),
+    )
     print("相机种数:", len({r["camera"]["name"] for r in kept}), "/", len(kept))
 
     # 7 拼图（log10，每样本 RGB 合成）
