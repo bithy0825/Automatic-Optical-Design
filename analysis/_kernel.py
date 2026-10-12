@@ -256,6 +256,14 @@ def integrate(
 
     Returns:
         未归一化的 ``|U|²``，形状 ``(P,F,W,H,H)``。无效光线贡献精确的 0。
+
+    实现要点（性能重写，数学不变）：
+
+    * 无效光线在逐光线小张量上消毒（几何量→有限值、倾斜权重→0），
+      贡献精确为 0，与原双重 where 屏蔽语义一致；
+    * ``|r|² = |Q|² − 2·Q·S + |S|²`` 展开式 + einsum（bmm 单核），
+      全程不物化 ``(FW,H,H,C,3)`` 的 r 向量；
+    * ``exp(iφ)`` 拆为 cos/sin 实数对累加（避免 complex128 大临时量）。
     """
     P, F, W, N = sp.points.shape[:4]
     H = Q.shape[2]
@@ -263,35 +271,37 @@ def integrate(
     psf = torch.zeros(P, F, W, H, H, device=device, dtype=torch.float64)
     FW = F * W
     chunk = max(1, chunk_elems // (FW * H * H))
+    k0fw = k0.repeat(F)  # (FW,)：fw = f·W + w，与 reshape(FW,…) 同序
     for p in range(P):
-        # (F,W) 拍平为一个批次；无效光线经双重 where 屏蔽，贡献精确为 0
-        S = sp.points[p].reshape(FW, N, 3)
-        nrm = sp.normals[p].reshape(FW, N, 3)
-        opd = sp.opd[p].reshape(FW, N)
-        d = dirs[p].reshape(FW, N, 3)
-        n_im = n_img[p].reshape(FW, N)
         valid = sp.valid[p].reshape(FW, N)
-        Qp = Q[p].unsqueeze(1).expand(F, W, H, H, 3).reshape(FW, H, H, 3)
-        k0w = k0.view(1, W).expand(F, W).reshape(FW).view(FW, 1, 1, 1)
+        v3 = valid.unsqueeze(-1)
+        S = torch.where(v3, sp.points[p].reshape(FW, N, 3), 0.0)
+        nrm = torch.where(v3, sp.normals[p].reshape(FW, N, 3), 0.0)
+        d = torch.where(v3, dirs[p].reshape(FW, N, 3), 0.0)
+        opd = torch.where(valid, sp.opd[p].reshape(FW, N), 0.0) * k0fw.unsqueeze(-1)
+        n_im = torch.where(valid, n_img[p].reshape(FW, N), 1.0) * k0fw.unsqueeze(-1)
+        # 倾斜因子权重 w = valid·R/2（R = 参考球半径，1/ρ 振幅的保标度参考）
+        w_ray = torch.where(valid, 0.5 * sp.radius[p].reshape(FW, 1), 0.0)
+        ss = (S * S).sum(-1)  # (FW,N)
+        sn = (S * nrm).sum(-1)  # (FW,N)
+        cos_i = (d * nrm).sum(-1)  # (FW,N)
+        Qf = Q[p].unsqueeze(1).expand(F, W, H, H, 3).reshape(FW, H * H, 3)
+        qq = (Qf * Qf).sum(-1)  # (FW,HH)
 
-        amp = torch.zeros(FW, H, H, device=device, dtype=torch.complex128)
-        Rw = sp.radius[p].reshape(FW).view(FW, 1, 1, 1)  # 1/ρ 振幅的保标度参考半径
+        amp_re = torch.zeros(FW, H * H, device=device, dtype=torch.float64)
+        amp_im = torch.zeros_like(amp_re)
         for s in range(0, N, chunk):
-            Sc = S[:, s : s + chunk]  # (FW,C,3)
-            r = Qp.unsqueeze(-2) - Sc[:, None, None]  # (FW,H,H,C,3)
-            rho = r.norm(dim=-1).clamp_min(1e-300)  # (FW,H,H,C)
-            phase = (
-                opd[:, None, None, s : s + chunk] + n_im[:, None, None, s : s + chunk] * rho
-            ) * k0w
-            nrmc = nrm[:, None, None, s : s + chunk]  # (FW,1,1,C,3)
-            cos_i = (d[:, s : s + chunk] * nrm[:, s : s + chunk]).sum(-1)  # (FW,C)
-            cos_d = (r / rho.unsqueeze(-1) * nrmc).sum(-1)  # (FW,H,H,C)
-            k_obl = 0.5 * (cos_i[:, None, None] + cos_d)  # Kirchhoff 倾斜因子
-            k_obl = k_obl * (Rw / rho)  # 精确 1/ρ 振幅（无效光线经下方 where 屏蔽）
-            vc = valid[:, None, None, s : s + chunk]  # (FW,1,1,C)
-            # 无效光线可能携带 nan/inf（死亡光线的发散几何），双重屏蔽
-            phase = torch.where(vc, phase, 0.0)
-            k_obl = torch.where(vc, k_obl, 0.0)
-            amp = amp + (k_obl * torch.exp(1j * phase.to(torch.complex128))).sum(-1)
-        psf[p] = amp.abs().square().view(F, W, H, H)
+            sl = slice(s, s + chunk)
+            qs = torch.einsum("fhc,fgc->fhg", Qf, S[:, sl])  # (FW,HH,C)
+            rr = (qq.unsqueeze(-1) + ss[:, None, sl] - 2.0 * qs).clamp_min(1e-300)
+            rho = rr.sqrt()
+            # 相位 k0·(OPD + n_img·ρ)：k0 已预乘进逐光线项，单次融合乘加
+            phase = torch.addcmul(opd[:, None, sl], n_im[:, None, sl], rho)
+            # k_obl = ½(cos_i + cos_d)·(R/ρ) = (cos_i·ρ + (Q·n̂−S·n̂))·w/ρ²，
+            # w_ray 已含 ½R 与有效掩码（rr≥1e-300；死亡光线 w=0 → 贡献精确 0）
+            dot = torch.einsum("fhc,fgc->fhg", Qf, nrm[:, sl]) - sn[:, None, sl]
+            k_obl = torch.addcmul(dot, cos_i[:, None, sl], rho) * w_ray[:, None, sl] / rr
+            amp_re += torch.einsum("fhc,fhc->fh", k_obl, torch.cos(phase))
+            amp_im += torch.einsum("fhc,fhc->fh", k_obl, torch.sin(phase))
+        psf[p] = (amp_re.square() + amp_im.square()).view(F, W, H, H)
     return psf
