@@ -8,7 +8,8 @@
 3. 从参考球面向显式绝对网格做 Kirchhoff 积分：
 
    相位 φ = k0·(OPD − OPD_chief + n_img·|r|)，r 为球面点指向像元的精确矢量；
-   倾斜因子 K = (cos_i + cos_d)/2（cos 均相对指向球心的内法向）。
+   倾斜因子 K = (cos_i + cos_d)/2（cos 均相对指向球心的内法向）；
+   振幅含精确 1/|r| 因子（以 R/|r| 写入，R 为参考球半径，raw 标度不变）。
 
 约定
 ----
@@ -21,7 +22,8 @@
 
 诚实的近似清单：标量 Kirchhoff 近似（边界项略去）；等振幅光瞳（无切趾，
 RayBundle 无振幅通道）；参考球半径的出瞳估计只影响采样经济性，不影响核
-正确性（精确距离核）；分块求和仅改变加法顺序（float64 非结合误差 ~1e-15）。
+正确性（精确距离核 + 精确 1/ρ 振幅）；分块求和仅改变加法顺序（float64
+非结合误差 ~1e-15）。
 """
 
 from collections.abc import Iterable
@@ -239,7 +241,10 @@ def integrate(
     k0: Tensor,
     chunk_elems: int,
 ) -> Tensor:
-    """Kirchhoff 积分：``U(Q) = Σ_r K·exp(i·k0·(OPD + n_img·|r|))``。
+    """Kirchhoff 积分：``U(Q) = Σ_r K·(R/|r|)·exp(i·k0·(OPD + n_img·|r|))``。
+
+    振幅含精确 1/|r| 因子，以 R/|r| 形式写入（R = 参考球半径，保持 raw
+    标度约定不变：窗口尺度 R/|r| ≈ 1，远场/大窗口极限更精确）。
 
     Args:
         sp: 参考球状态（``(P,F,W,N,...)``）。
@@ -270,6 +275,7 @@ def integrate(
         k0w = k0.view(1, W).expand(F, W).reshape(FW).view(FW, 1, 1, 1)
 
         amp = torch.zeros(FW, H, H, device=device, dtype=torch.complex128)
+        Rw = sp.radius[p].reshape(FW).view(FW, 1, 1, 1)  # 1/ρ 振幅的保标度参考半径
         for s in range(0, N, chunk):
             Sc = S[:, s : s + chunk]  # (FW,C,3)
             r = Qp.unsqueeze(-2) - Sc[:, None, None]  # (FW,H,H,C,3)
@@ -281,6 +287,7 @@ def integrate(
             cos_i = (d[:, s : s + chunk] * nrm[:, s : s + chunk]).sum(-1)  # (FW,C)
             cos_d = (r / rho.unsqueeze(-1) * nrmc).sum(-1)  # (FW,H,H,C)
             k_obl = 0.5 * (cos_i[:, None, None] + cos_d)  # Kirchhoff 倾斜因子
+            k_obl = k_obl * (Rw / rho)  # 精确 1/ρ 振幅（无效光线经下方 where 屏蔽）
             vc = valid[:, None, None, s : s + chunk]  # (FW,1,1,C)
             # 无效光线可能携带 nan/inf（死亡光线的发散几何），双重屏蔽
             phase = torch.where(vc, phase, 0.0)

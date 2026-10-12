@@ -20,12 +20,15 @@ Zemax 式缩放（:meth:`Sequential.scale`）要求逐个体独立缩放。
 
     coverage = Σ_window raw · delta² · N_emit · A_pupil / ((λ·f_eff/n_img)² · Σ_valid w_r²)
 
-w_r 取入射倾斜因子 cos_i（出射侧 cos_d 随 Q 变化无法入账；NA 不大时
-cos_i ≈ 1，误差在几个百分点内）。Fourier 尺度用**光瞳映射有效焦距**
-``f_eff = (epd/2)/NA``（逐 (P,F,W) 由边缘光线方向实测，对应 sine 映射
-``px = f_eff·n·ŝ``）——参考球半径是顶点-像点距离，与 f_eff 可差数个
-百分点，直接决定归一化常数。离散求和代替积分要求 delta 满足 Nyquist
-（自动 delta 保证；用户覆盖时由 ``UNDERSAMPLED_IMAGE`` 告警）。
+w_r 取窗心倾斜因子 ``(1+cos_i)/2``：球面点精确位于以球心为窗心的参考球上，
+窗心处 cos_d ≡ 1，与核内 ``K=(cos_i+cos_d)/2`` 自洽（窗内 cos_d 变化忽略）。
+Fourier 尺度用**光瞳映射有效焦距** ``f_eff = (epd/2)/NA``（逐 (P,F,W) 由边缘
+光线方向实测，对应 sine 映射 ``px = f_eff·n·ŝ``）。注意：参考球半径
+``sp.radius``（出瞳估计）曾被尝试作为该常数并被实验否决——Airy 方窗能量
+仲裁误差 +0.071（f_eff 仅 −0.005）、几何极限仲裁 +0.059，且在真实镜头上
+出瞳估计可病态。离散求和代替积分
+要求 delta 满足 Nyquist（自动 delta 保证；用户覆盖时由 ``UNDERSAMPLED_IMAGE``
+告警）。
 
 有限光线数 N 的相位混叠底噪（raw ≈ 1/N_emit / px，远场相位去相关后的
 随机游走残差）使超大窗口的覆盖率被高估；grow 模式以 ``max_size`` 上限
@@ -243,12 +246,14 @@ def _coverage(
 ) -> Tensor:
     """窗口能量覆盖率 (P,F,W)（Parseval 归一化，见模块 docstring）。
 
-    Fourier 尺度为逐 (P,F,W) 的光瞳映射有效焦距 ``f_eff = (epd/2)/NA``
-    （由存活光线最大半角正弦实测）；na ≈ 0（全死）时覆盖率为 0。
+    振幅权重 w_r = (1+cos_i)/2（窗心倾斜因子，与核内 K=(cos_i+cos_d)/2 自洽）；
+    Fourier 尺度为逐 (P,F,W) 的光瞳映射有效焦距 ``f_eff = (epd/2)/NA``；
+    na ≈ 0（全死）时覆盖率为 0。
     """
     na = _na(tr, sp)  # (P,F,W)
     cos_i = (tr.dirs * sp.normals).sum(dim=-1).clamp_min(0.0)  # (P,F,W,N)
-    w2 = torch.where(sp.valid, cos_i.square(), torch.zeros_like(cos_i)).sum(dim=-1)
+    w = 0.5 * (1.0 + cos_i)  # 窗心处 cos_d ≡ 1（球面点精确位于参考球上）
+    w2 = torch.where(sp.valid, w.square(), torch.zeros_like(w)).sum(dim=-1)
     n_emit = sp.points.shape[3]
     a_half = 0.5 * epd
     a_pupil = torch.pi * a_half**2
