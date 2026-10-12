@@ -3,11 +3,15 @@
 设计文档：``docs/psf-dataset-v2.md``（流程的单一事实源，本文件是实现）。
 
 流程概要：逐镜头加载 checkpoint（256 结构）→ 两层 FPS 选 8 结构（0 固定 +
-前 16 选 3 + 16–64 选 4）→ 每镜头随机 1 台相机（**全量波长**随相机网格，
-31–186 个）→ 每结构 1 轴上参考（兼作 T(0) 能量基准）+ 12 方位 × 4 径向
-= 48 抖动视场 → 每样本视场相关阈值 τ_j（Beta 采样）门控 + scale 补救 →
-逐样本独立概率扰动（q_j 下降量门控 + 0.70 绝对下限，q 退火）→ 全光谱
-通道合成 + 能量定标（``w_c·cos^n(θ)·T(θ)/T(0)``，连续无硬阈值）。
+前 16 选 3 + 16–64 选 4）→ 每结构 1 轴上参考（兼作 T(0) 能量基准）+
+每径向档（1 固定 φ=0 锚点 + 6 抖动档）× 4 径向 = 28 视场（旋转对称 +
+训练端旋转增强）→ 每样本视场相关阈值 τ_j（Beta 采样）门控 + scale 补救 →
+逐样本独立概率扰动（q_j 下降量门控 + 0.70 绝对下限，q 退火；轴上同规则：
+扰动验收通过则只出货扰动版）→ 全光谱通道合成 + 能量定标
+（``w_c·cos^n(θ)·T(θ)/T(0)``，连续无硬阈值）。相机文件已由
+``scripts/unify_camera_wavelengths.py`` 统一到公共波长网格（PCHIP 重采样）
+→ **评估与相机完全解耦**，每个出货样本独立抽取 1 台相机（仅影响合成权重，
+零额外评估成本）。
 
 用法::
 
@@ -60,7 +64,8 @@ _PERTURB_WEIGHTS = (
     ("spacing", 0.15),
     ("sensor_tilt", 0.10),
 )
-_N_AZIMUTH, _N_RADIAL = 12, 4  # 视场分档（档内全幅抖动 → 相邻档重叠）
+_N_AZIMUTH, _N_RADIAL = 6, 4  # 视场分档（档内全幅抖动 → 相邻档重叠）
+_AZIMUTH_SPAN = math.pi / 2  # 方位域限 (0°,90°]（另有 φ=0 固定锚点）：旋转对称 + 训练端旋转增强
 
 
 # ── 镜头库与相机库 ──
@@ -78,22 +83,23 @@ def find_lenses(lib: Path) -> list[Path]:
 
 @dataclass(frozen=True)
 class Camera:
-    """一台相机的全光谱数据（加载时防御性重归一化 + 梯形积分权重）。"""
+    """一台相机的光谱数据（文件已统一网格；加载时防御性重归一化 + 梯形权重）。"""
 
     name: str
-    wavelengths: tuple[float, ...]  # 升序，W 个（31–186 随网格）
+    wavelengths: tuple[float, ...]  # 升序，W 个（统一网格，全部相机一致）
     rgb: torch.Tensor  # (W,3) float64，全局峰值归一
-    trapz: torch.Tensor  # (W,) 梯形积分权重（该相机自己的网格）
+    trapz: torch.Tensor  # (W,) 梯形积分权重
     w_c: torch.Tensor  # (3,) 通道积分权重（max 通道归一）
 
 
 def load_cameras(directory: Path) -> list[Camera]:
-    """相机库 → 全光谱 Camera 列表。波长网格逐相机原样使用，不抽稀不重插。"""
+    """相机库 → Camera 列表。文件应已被 unify_camera_wavelengths.py 统一网格。"""
     cams = []
+    grids = set()
     for f in sorted(directory.glob("*.pt")):
         d = torch.load(f, weights_only=True, map_location="cpu")
         wl, rgb = d["wavelengths"].double(), d["rgb"].double()
-        rgb = rgb / rgb.max()  # 防御性重归一化（现库实测全部已为 1）
+        rgb = rgb / rgb.max()  # 防御性重归一化
         order = torch.argsort(wl)  # 防御：保证波长升序（rgb 行同步）
         wl, rgb = wl[order], rgb[order]
         # 梯形权重：端点半权，内部取相邻 Δλ 均值（非均匀网格自动正确）
@@ -105,6 +111,7 @@ def load_cameras(directory: Path) -> list[Camera]:
         if bool((integ <= 0).any()):
             print(f"[warn] camera {f.stem}: 退化通道，跳过")
             continue
+        grids.add(tuple(round(float(w), 6) for w in wl))
         cams.append(
             Camera(
                 name=str(d.get("camera", f.stem)),
@@ -116,6 +123,11 @@ def load_cameras(directory: Path) -> list[Camera]:
         )
     if not cams:
         raise FileNotFoundError(f"no cameras in {directory}")
+    if len(grids) > 1:
+        print(
+            f"[warn] 相机波长网格不统一（{len(grids)} 种）——评估将与相机耦合，"
+            "请先运行 scripts/unify_camera_wavelengths.py"
+        )
     return cams
 
 
@@ -170,23 +182,32 @@ def select_structures(
     return tuple(first + second)
 
 
-# ── 视场采样（12 方位 × 4 径向，档内全幅抖动 → 相邻档重叠） ──
+# ── 视场采样（每径向档：1 固定 φ=0 + 6 方位抖动档） ──
 
 
 def sample_fields(h_max: float, rng: torch.Generator) -> list[tuple[float, float, int, int, bool]]:
-    """48 个视场点：``(fx, fy, 方位档 i, 径向档 j, 越界标志)``，单位 deg。
+    """28 个视场点：``(fx, fy, 方位档 i, 径向档 j, 越界标志)``，单位 deg。
 
-    φ_i = (i+0.5)·30° + U(−1,+1)·30°；r_j = (j+0.5)·(h/4) + U(−1,+1)·(h/4)，
-    r clamp 到 [0.005·h, h]（下端避免与轴上参考样本精确重复；越上界记标志）。
+    每径向档：i=0 为固定 φ=0 样本（不抖动，子午基准方向锚点，可复现对照）；
+    i=1..6 为 (0°,90°] 象限 6 个抖动档（旋转对称：干净样本同环互为旋转副本；
+    扰动方向为各向同性 2D 高斯 → 训练端旋转增强与直接采样同分布）。
+    φ_i = (i−0.5)·15° + U(−1,+1)·15°，clamp 进 (0°,90°]（下端留 ε 避免与
+    固定锚点重复）；r_j = (j+0.5)·(h/4) + U(−1,+1)·(h/4)，clamp 到
+    [0.005·h, h]（下端避免与轴上参考样本精确重复；越上界记标志）。
     """
 
     def u() -> float:
         return float(torch.rand((), generator=rng)) * 2.0 - 1.0
 
+    bin_w = _AZIMUTH_SPAN / _N_AZIMUTH  # 15°
     out = []
     for j in range(_N_RADIAL):
-        for i in range(_N_AZIMUTH):
-            phi = (i + 0.5) * (2 * math.pi / _N_AZIMUTH) + u() * (2 * math.pi / _N_AZIMUTH)
+        for i in range(_N_AZIMUTH + 1):
+            if i == 0:
+                phi = 0.0
+            else:
+                phi = (i - 0.5) * bin_w + u() * bin_w
+                phi = min(max(phi, 0.01 * bin_w), _AZIMUTH_SPAN)
             r = (j + 0.5) * (h_max / _N_RADIAL) + u() * (h_max / _N_RADIAL)
             extra = r > h_max
             r = min(max(r, 0.005 * h_max), h_max)
@@ -436,7 +457,7 @@ def ship_sample(
     tput_c = channel_throughput(rep.throughput[0, 0], cam)  # (3,)
     ratio = tput_c / tput0_c.clamp_min(1e-300)
     e_c = energy_scale(cam.w_c, theta_deg, ratio, n_exp)  # (3,)
-    img = (psf_c * e_c.view(3, 1, 1)).permute(1, 2, 0).to(torch.float32).clamp_min(0)
+    img = (psf_c * e_c.view(3, 1, 1)).permute(1, 2, 0).to(torch.float32).clamp_min(0).cpu()
     energy = {
         "w_c": [round(float(x), 6) for x in cam.w_c],
         "cos_n": round(math.cos(math.radians(theta_deg)) ** n_exp, 6),
@@ -488,7 +509,7 @@ def build_dataset(
     cov_floor: float = _COV_FLOOR_PERTURB,
     theta_ref: float = _THETA_REF,
     e_ref: float = _E_REF,
-    chunk_elems: int = 32_000_000,
+    chunk_elems: int = 64_000_000,
     seed: int = 0,
     device: str = "cpu",
     limit_structures: int | None = None,
@@ -508,7 +529,9 @@ def build_dataset(
     commit = _git_commit()
     n_exp = math.log(e_ref) / math.log(math.cos(math.radians(theta_ref)))
     print(
-        f"[cfg] lenses={len(lens_dirs)} cameras={len(cameras)} n_exp={n_exp:.4f} "
+        f"[cfg] lenses={len(lens_dirs)} cameras={len(cameras)} "
+        f"W={len(cameras[0].wavelengths)} ({cameras[0].wavelengths[0]:.0f}-"
+        f"{cameras[0].wavelengths[-1]:.0f}nm) n_exp={n_exp:.4f} "
         f"(cos^{n_exp:.2f}θ: {theta_ref}°→{e_ref}) tau=[{tau_lo},{tau_cap}] s_lo={s_lo}"
     )
 
@@ -533,11 +556,7 @@ def build_dataset(
         if limit_structures:
             structures = structures[:limit_structures]
         h = _h_max(target.fov)
-        cam = cameras[int(torch.randint(len(cameras), (), generator=rng))]
-        print(
-            f"[lens] {lens_id} structures={structures} h_max={h:.2f}° "
-            f"camera={cam.name} (W={len(cam.wavelengths)})"
-        )
+        print(f"[lens] {lens_id} structures={structures} h_max={h:.2f}°")
 
         records: list[dict[str, Any]] = []
         n_saved, n_counter = 0, 0
@@ -552,14 +571,18 @@ def build_dataset(
             rec["file"] = f"psf/{name}"
             n_saved += 1
 
+        def draw_cam(rng: torch.Generator = rng) -> Camera:
+            """每个出货样本独立抽 1 台相机（统一网格后评估与相机解耦）。"""
+            return cameras[int(torch.randint(len(cameras), (), generator=rng))]
+
         def base_rec(
             s_k: int,
             field: tuple[float, float],
             bins: tuple[int, int],
             extra: bool,
             n_seq: int,
+            cam: Camera | None,
             lens_id: str = lens_id,
-            cam: Camera = cam,
             lens_seed: int = lens_seed,
             commit: str = commit,
         ):
@@ -568,11 +591,15 @@ def build_dataset(
                 "git_commit": commit,
                 "lens_id": lens_id,
                 "structure": s_k,
-                "camera": {
-                    "name": cam.name,
-                    "n_wavelengths": len(cam.wavelengths),
-                    "w_c": [round(float(x), 6) for x in cam.w_c],
-                },
+                "camera": (
+                    None
+                    if cam is None
+                    else {
+                        "name": cam.name,
+                        "n_wavelengths": len(cam.wavelengths),
+                        "w_c": [round(float(x), 6) for x in cam.w_c],
+                    }
+                ),
                 "field_deg": [round(field[0], 6), round(field[1], 6)],
                 "bins": {"azimuth": bins[0], "radial": bins[1]},
                 "fov_extrapolated": extra,
@@ -581,50 +608,59 @@ def build_dataset(
             }
 
         for s_k in structures:
-            # ── 轴上参考（干净阶段兼作 T(0) 基准；入集样本仍可扰动，孪生出货） ──
+            # ── 轴上参考：干净阶段兼作 T(0) 基准；与视场样本同扰动规则
+            # （抽中且验收通过 → 只出货扰动版；否则出货干净版，无孪生） ──
             tau0 = tau_j(0.0, np_rng, tau_lo, tau_cap)
             try:
-                rep0, rec0 = make_clean(seq, s_k, (0.0, 0.0), cam, tau0, pupil_n, chunk_elems, s_lo)
+                rep0, rec0 = make_clean(
+                    seq, s_k, (0.0, 0.0), cameras[0], tau0, pupil_n, chunk_elems, s_lo
+                )
             except Exception as e:  # noqa: BLE001
-                rec = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter)
+                rec = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter, None)
                 rec["dropped"] = f"axis error: {type(e).__name__}: {e}"
                 records.append(rec)
                 continue
-            rec = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter)
-            rec.update(rec0)
-            rec["rotation_group"] = f"{lens_id}#s{s_k}#axis"
             if any(i == Issue.THRESHOLD_UNREACHABLE for i, *_ in rep0.issues):
+                rec = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter, None)
+                rec.update(rec0)
+                rec["rotation_group"] = f"{lens_id}#s{s_k}#axis"
                 rec["dropped"] = "axis_threshold_unreachable"
                 records.append(rec)
                 continue  # 无 T(0) 锚点 → 跳过整个结构
-            tput0_c = channel_throughput(rep0.throughput[0, 0], cam)
-            img, en = ship_sample(rep0, cam, 0.0, tput0_c, n_exp)
-            rec.update(en)
-            rec["perturb"] = "none"
-            rec["q_j"] = None
-            save(img, rec, "axis")
-            records.append(rec)
-            # 轴上扰动孪生（独立抽奖）
+            rep_f, pinfo, qj = rep0, "none", None
             if float(torch.rand((), generator=rng)) < perturb_prob:
                 qj = q_j(0.0, np_rng, q_min, q_max)
-                rep_t, pinfo = try_perturb(
-                    seq, s_k, (0.0, 0.0), cam, rep0, qj, cov_floor, pupil_n, chunk_elems, s_lo, rng
+                rep_p, pinfo = try_perturb(
+                    seq,
+                    s_k,
+                    (0.0, 0.0),
+                    cameras[0],
+                    rep0,
+                    qj,
+                    cov_floor,
+                    pupil_n,
+                    chunk_elems,
+                    s_lo,
+                    rng,
                 )
                 if pinfo != "fallback":
-                    img_t, en_t = ship_sample(rep_t, cam, 0.0, tput0_c, n_exp)
-                    rec_t = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter)
-                    rec_t.update(rec0)
-                    rec_t.update(en_t)
-                    rec_t["perturb"] = pinfo
-                    rec_t["q_j"] = qj
-                    rec_t["coverage"] = min(float(rep_t.coverage.min()), 1.0)
-                    rec_t["coverage_raw"] = float(rep_t.coverage.min())
-                    rec_t["rotation_group"] = f"{lens_id}#s{s_k}#axis"
-                    rec_t["issues"] = _issues_of(rep_t)
-                    save(img_t, rec_t, "axisP")
-                    records.append(rec_t)
+                    rep_f = rep_p
+            cam = draw_cam()
+            tput0_c = channel_throughput(rep0.throughput[0, 0], cam)
+            img, en = ship_sample(rep_f, cam, 0.0, tput0_c, n_exp)
+            rec = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter, cam)
+            rec.update(rec0)
+            rec.update(en)
+            rec["rotation_group"] = f"{lens_id}#s{s_k}#axis"
+            rec["perturb"], rec["q_j"] = pinfo, qj
+            if pinfo not in ("none", "fallback"):
+                rec["coverage"] = min(float(rep_f.coverage.min()), 1.0)
+                rec["coverage_raw"] = float(rep_f.coverage.min())
+                rec["issues"] = _issues_of(rep_f)
+            save(img, rec, "axis")
+            records.append(rec)
 
-            # ── 48 视场 ──
+            # ── 12 视场（3 方位 × 4 径向） ──
             fields = sample_fields(h, rng)
             if limit_fields:
                 fields = fields[:limit_fields]
@@ -632,35 +668,55 @@ def build_dataset(
                 theta = math.hypot(fx, fy)
                 th_hat = theta / h
                 tau = tau_j(th_hat, np_rng, tau_lo, tau_cap)
-                rec = base_rec(s_k, (fx, fy), (i, j), extra, n_counter)
-                rec["rotation_group"] = f"{lens_id}#s{s_k}#r{j}"
                 try:
-                    rep, crec = make_clean(seq, s_k, (fx, fy), cam, tau, pupil_n, chunk_elems, s_lo)
+                    rep, crec = make_clean(
+                        seq, s_k, (fx, fy), cameras[0], tau, pupil_n, chunk_elems, s_lo
+                    )
                 except Exception as e:  # noqa: BLE001
+                    rec = base_rec(s_k, (fx, fy), (i, j), extra, n_counter, None)
                     rec["dropped"] = f"error: {type(e).__name__}: {e}"
                     records.append(rec)
                     continue
-                rec.update(crec)
                 if any(i2 == Issue.THRESHOLD_UNREACHABLE for i2, *_ in rep.issues) or any(
                     i2 == Issue.NO_ALIVE_RAYS for i2, *_ in rep.issues
                 ):
+                    rec = base_rec(s_k, (fx, fy), (i, j), extra, n_counter, None)
+                    rec.update(crec)
+                    rec["rotation_group"] = f"{lens_id}#s{s_k}#r{j}"
                     rec["dropped"] = "threshold_unreachable"
                     records.append(rec)
                     continue
                 # 逐样本独立扰动抽奖
-                rec["perturb"], rec["q_j"] = "none", None
+                rep_f, pinfo, qj = rep, "none", None
                 if float(torch.rand((), generator=rng)) < perturb_prob:
                     qj = q_j(th_hat, np_rng, q_min, q_max)
                     rep_p, pinfo = try_perturb(
-                        seq, s_k, (fx, fy), cam, rep, qj, cov_floor, pupil_n, chunk_elems, s_lo, rng
+                        seq,
+                        s_k,
+                        (fx, fy),
+                        cameras[0],
+                        rep,
+                        qj,
+                        cov_floor,
+                        pupil_n,
+                        chunk_elems,
+                        s_lo,
+                        rng,
                     )
-                    rec["perturb"], rec["q_j"] = pinfo, qj
-                    rep = rep_p
-                    rec["coverage"] = min(float(rep.coverage.min()), 1.0)
-                    rec["coverage_raw"] = float(rep.coverage.min())
-                    rec["issues"] = _issues_of(rep)
-                img, en = ship_sample(rep, cam, theta, tput0_c, n_exp)
+                    if pinfo != "fallback":
+                        rep_f = rep_p
+                cam = draw_cam()
+                tput0_c = channel_throughput(rep0.throughput[0, 0], cam)
+                img, en = ship_sample(rep_f, cam, theta, tput0_c, n_exp)
+                rec = base_rec(s_k, (fx, fy), (i, j), extra, n_counter, cam)
+                rec.update(crec)
                 rec.update(en)
+                rec["rotation_group"] = f"{lens_id}#s{s_k}#r{j}"
+                rec["perturb"], rec["q_j"] = pinfo, qj
+                if pinfo not in ("none", "fallback"):
+                    rec["coverage"] = min(float(rep_f.coverage.min()), 1.0)
+                    rec["coverage_raw"] = float(rep_f.coverage.min())
+                    rec["issues"] = _issues_of(rep_f)
                 save(img, rec, f"a{i:02d}r{j:02d}")
                 records.append(rec)
 
@@ -704,7 +760,7 @@ def main() -> None:
     ap.add_argument("--cov-floor", type=float, default=_COV_FLOOR_PERTURB)
     ap.add_argument("--theta-ref", type=float, default=_THETA_REF, help="能量衰减标定点角度 (deg)")
     ap.add_argument("--e-ref", type=float, default=_E_REF, help="能量衰减标定点值")
-    ap.add_argument("--chunk-elems", type=int, default=32_000_000)
+    ap.add_argument("--chunk-elems", type=int, default=64_000_000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument(
