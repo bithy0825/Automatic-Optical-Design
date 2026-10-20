@@ -16,7 +16,7 @@
 用法::
 
     python scripts/build_psf_dataset_v2.py --lib <库根> --out <输出目录> \
-        [--lenses Zebase/A_001 ...] [--pupil 65536] [--device cuda]
+        [--lenses Zebase/A_001 ...] [--pupil 65536] [--device cuda] [--dtype float32]
 
 产出：``<out>/psf/<样本名>.pt``（``{"psf": (64,64,3) float32, "meta": ...}``，
 通道和 = 该工况相对能量 E_c，**非** Σ=1）+ ``<out>/meta/<镜头>.jsonl``
@@ -50,7 +50,7 @@ _NM_TO_MM = 1e-6
 _SCHEMA_VERSION = 2
 
 # 默认旋钮（docs/psf-dataset-v2.md §5/§7/§8）
-_TAU_LO, _TAU_CAP = 0.80, 0.97  # τ_j 采样范围（视场相关 Beta）
+_TAU_LO, _TAU_CAP = 0.80, 0.9  # τ_j 采样范围（视场相关 Beta）
 _SCALE_LO = 0.3  # scale 补救下限
 _PERTURB_PROB = 0.1  # 逐样本独立扰动概率
 _Q_MIN, _Q_MAX = 0.02, 0.15  # q_j = max(q_min, x_q·q_max)
@@ -329,7 +329,13 @@ def _scale_pose(pose: Pose, q: float) -> Pose:
 
 
 def _spec(
-    cam: Camera, field: tuple[float, float], tau: float, pupil_n: int, chunk_elems: int, s_lo: float
+    cam: Camera,
+    field: tuple[float, float],
+    tau: float,
+    pupil_n: int,
+    chunk_elems: int,
+    s_lo: float,
+    dtype: torch.dtype,
 ) -> PsfSpec:
     return PsfSpec(
         field=field,
@@ -341,11 +347,13 @@ def _spec(
         remedy="scale",
         scale_bounds=(s_lo, 1.0),
         chunk_elems=chunk_elems,
+        dtype=dtype,
     )
 
 
 def channel_synthesize(rep_psf: torch.Tensor, cam: Camera) -> torch.Tensor:
     """全光谱通道合成：(W,H,H) → (3,H,H)，每通道 Σ=1（能量定标前）。"""
+    rep_psf = rep_psf.double()  # 与 float64 相机权重对齐（f32 计算时升级）
     wt = cam.rgb.to(rep_psf.device) * cam.trapz.to(rep_psf.device).unsqueeze(1)  # (W,3)
     den = wt.sum(dim=0).clamp_min(1e-300)  # (3,)
     return torch.einsum("whk,wc->chk", rep_psf, wt) / den.view(3, 1, 1)
@@ -353,6 +361,7 @@ def channel_synthesize(rep_psf: torch.Tensor, cam: Camera) -> torch.Tensor:
 
 def channel_throughput(rep_tput: torch.Tensor, cam: Camera) -> torch.Tensor:
     """光谱加权逐通道吞吐：(W,) → (3,)。"""
+    rep_tput = rep_tput.double()
     wt = cam.rgb.to(rep_tput.device) * cam.trapz.to(rep_tput.device).unsqueeze(1)
     den = wt.sum(dim=0).clamp_min(1e-300)
     return (rep_tput.unsqueeze(1) * wt).sum(dim=0) / den
@@ -388,10 +397,12 @@ def make_clean(
     pupil_n: int,
     chunk_elems: int,
     s_lo: float,
+    dtype: torch.dtype,
 ) -> tuple[Any, dict[str, Any]]:
     """阶段 1：干净评估（τ_j 门控 + scale 补救）。返回 (report, 阶段记录)。"""
     rep = psf(
-        seq, replace(_spec(cam, field, tau, pupil_n, chunk_elems, s_lo), structures=structure)
+        seq,
+        replace(_spec(cam, field, tau, pupil_n, chunk_elems, s_lo, dtype), structures=structure),
     )
     cov = float(rep.coverage.min())
     rec: dict[str, Any] = {
@@ -419,6 +430,7 @@ def try_perturb(
     pupil_n: int,
     chunk_elems: int,
     s_lo: float,
+    dtype: torch.dtype,
     rng: torch.Generator,
 ) -> tuple[Any, dict[str, Any] | str]:
     """阶段 2：扰动（q 退火，双条件验收）。返回 (最终 report, 扰动记录)。"""
@@ -430,7 +442,7 @@ def try_perturb(
     pose, info = sample_perturbation(sub, f_eff, f_num, min(wl) * _NM_TO_MM, rng)
     cov_clean = float(clean_rep.coverage.min())
     spec = replace(
-        _spec(cam, field, 0.0, pupil_n, chunk_elems, s_lo),
+        _spec(cam, field, 0.0, pupil_n, chunk_elems, s_lo, dtype),
         structures=0,
         delta=clean_rep.delta,
     )
@@ -512,6 +524,7 @@ def build_dataset(
     chunk_elems: int = 64_000_000,
     seed: int = 0,
     device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
     limit_structures: int | None = None,
     limit_fields: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -532,7 +545,8 @@ def build_dataset(
         f"[cfg] lenses={len(lens_dirs)} cameras={len(cameras)} "
         f"W={len(cameras[0].wavelengths)} ({cameras[0].wavelengths[0]:.0f}-"
         f"{cameras[0].wavelengths[-1]:.0f}nm) n_exp={n_exp:.4f} "
-        f"(cos^{n_exp:.2f}θ: {theta_ref}°→{e_ref}) tau=[{tau_lo},{tau_cap}] s_lo={s_lo}"
+        f"(cos^{n_exp:.2f}θ: {theta_ref}°→{e_ref}) tau=[{tau_lo},{tau_cap}] s_lo={s_lo} "
+        f"dtype={dtype}"
     )
 
     for lens_dir in lens_dirs:
@@ -605,6 +619,7 @@ def build_dataset(
                 "fov_extrapolated": extra,
                 "split": _split(lens_id),
                 "seed_sample": (lens_seed + n_seq) % (2**31),
+                "dtype": str(dtype),
             }
 
         for s_k in structures:
@@ -613,7 +628,7 @@ def build_dataset(
             tau0 = tau_j(0.0, np_rng, tau_lo, tau_cap)
             try:
                 rep0, rec0 = make_clean(
-                    seq, s_k, (0.0, 0.0), cameras[0], tau0, pupil_n, chunk_elems, s_lo
+                    seq, s_k, (0.0, 0.0), cameras[0], tau0, pupil_n, chunk_elems, s_lo, dtype
                 )
             except Exception as e:  # noqa: BLE001
                 rec = base_rec(s_k, (0.0, 0.0), (-1, -1), False, n_counter, None)
@@ -641,6 +656,7 @@ def build_dataset(
                     pupil_n,
                     chunk_elems,
                     s_lo,
+                    dtype,
                     rng,
                 )
                 if pinfo != "fallback":
@@ -660,7 +676,7 @@ def build_dataset(
             save(img, rec, "axis")
             records.append(rec)
 
-            # ── 12 视场（3 方位 × 4 径向） ──
+            # ── 28 视场（7 方位 × 4 径向：每径向档 1 固定 φ=0 锚点 + 6 抖动档） ──
             fields = sample_fields(h, rng)
             if limit_fields:
                 fields = fields[:limit_fields]
@@ -670,7 +686,7 @@ def build_dataset(
                 tau = tau_j(th_hat, np_rng, tau_lo, tau_cap)
                 try:
                     rep, crec = make_clean(
-                        seq, s_k, (fx, fy), cameras[0], tau, pupil_n, chunk_elems, s_lo
+                        seq, s_k, (fx, fy), cameras[0], tau, pupil_n, chunk_elems, s_lo, dtype
                     )
                 except Exception as e:  # noqa: BLE001
                     rec = base_rec(s_k, (fx, fy), (i, j), extra, n_counter, None)
@@ -701,6 +717,7 @@ def build_dataset(
                         pupil_n,
                         chunk_elems,
                         s_lo,
+                        dtype,
                         rng,
                     )
                     if pinfo != "fallback":
@@ -764,10 +781,20 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument(
+        "--dtype",
+        choices=("float32", "float64"),
+        default="float32",
+        help="计算精度（默认 float32：5080 上 FP64 为 1/64 速率不可接受；积分器相位分裂后 "
+        "f32/f64 覆盖率差 ~1e-4，不翻转门控决策，对拍见 scripts/exp_f32_f64_compare.py）",
+    )
+    ap.add_argument(
         "--limit-structures", type=int, default=None, help="pilot：每镜头只跑前 k 个结构"
     )
     ap.add_argument("--limit-fields", type=int, default=None, help="pilot：每结构只跑前 k 个视场")
     a = ap.parse_args()
+    # einsum 底屄 bmm 必须全程真 float32 累加（TF32 尾数仅 10 bit，会抵消相位分裂的收益）
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     build_dataset(
         a.lib,
         a.out,
@@ -785,6 +812,7 @@ def main() -> None:
         chunk_elems=a.chunk_elems,
         seed=a.seed,
         device=a.device,
+        dtype=torch.float32 if a.dtype == "float32" else torch.float64,
         limit_structures=a.limit_structures,
         limit_fields=a.limit_fields,
     )
