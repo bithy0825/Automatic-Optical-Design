@@ -7,10 +7,12 @@
 
 处理模型
 --------
-逐结构独立处理：``structures`` 选中的每个个体先切片为 P=1 链
-（:meth:`Sequential.select`），再经评估链（视场单点覆盖、光瞳/波长覆盖、
-按 ``PsfSpec.dtype`` 转换精度）追迹 + 直评。逐结构而非批量的原因：光源
-``epd`` 是种群共享标量，
+    逐结构独立处理：``structures`` 选中的每个个体先切片为 P=1 链
+（:meth:`Sequential.select`），再经评估链（视场单点覆盖、光瞳/波长覆盖）
+追迹 + 直评。追迹恒为 float64（其耗时为 kernel 启动/带宽延迟主导而非 FP
+速率主导，5080 实测 f32/f64 同为 ~0.14s，零成本换取波前无 f32 噪声）；
+积分器精度由 ``PsfSpec.dtype`` 控制（大张量，FP 速率瓶颈所在）。
+逐结构而非批量的原因：光源 ``epd`` 是种群共享标量，
 Zemax 式缩放（:meth:`Sequential.scale`）要求逐个体独立缩放。
 
 能量覆盖率（Parseval 归一化）
@@ -52,7 +54,7 @@ Fourier 尺度用**光瞳映射有效焦距** ``f_eff = (epd/2)/NA``（逐 (P,F,
 位姿，重编译保证注入基准正确；误差量纲为绝对单位（mm / rad），不随缩放
 变化（加工误差的物理诚实解释）。逐结构 P=1 评估，每次调用是误差分布的
 单次实现；蒙特卡洛公差分析请逐结构多次调用。``callback`` 为底层原始回调
-（其预计算张量须与 ``spec.dtype`` 一致）。
+（其预计算张量须为 float64——追迹恒在 float64 链上进行）。
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -112,9 +114,9 @@ class PsfSpec:
     * ``size`` / ``delta``：最终 PSF 尺寸与像素节距 (mm/px)；``delta=None``
       → Nyquist ``λ_min/(4·NA_max)``。grow 模式下 ``size`` 为最小尺寸。
     * ``energy_threshold``：窗口能量覆盖率阈值 τ ∈ [0,1)，0 = 不判定不补救。
-    * ``dtype``：计算精度（float64 默认；float32 在 5080 上约快一个量级——
-      其 FP64 仅 1/64 速率，积分器的相位分裂使 f32/f64 覆盖率差 ~1e-4，
-      不翻转门控决策）。
+    * ``dtype``：积分器精度（float64 默认；数据集生成用 float32——
+      大张量积分是 FP 速率瓶颈，f32 在 5080 上快一个量级；追迹恒 f64
+      不受此影响，f32 模式残余误差仅为积分器噪声 ~5e-4 relL2）。
     * ``errors`` / ``callback``：误差注入（见模块 docstring）。
     """
 
@@ -177,8 +179,8 @@ class PsfSpec:
 class PsfReport:
     """逐波长单色 PSF、覆盖率与缩放记录、诊断。
 
-    ``psf`` / ``raw`` / ``coverage`` / ``na`` / ``opd`` 跟随 ``PsfSpec.dtype``；
-    ``throughput`` / ``scale`` 恒为 float64。
+    ``psf`` / ``raw`` / ``na`` 跟随 ``PsfSpec.dtype``；
+    ``throughput`` / ``scale`` / ``coverage`` / ``opd`` 恒为 float64。
 
     ``psf`` / ``raw`` 形状 ``(P',F,W,H,H)``：``P'`` 对应 ``structures``
     顺序，``F`` 为视场数（spec.field 单点 → F=1），``psf[...,i,j] ↔ (x_i, y_j)``。
@@ -262,21 +264,22 @@ def _coverage(
 
     振幅权重 w_r = (1+cos_i)/2（窗心倾斜因子，与核内 K=(cos_i+cos_d)/2 自洽）；
     Fourier 尺度为逐 (P,F,W) 的光瞳映射有效焦距 ``f_eff = (epd/2)/NA``；
-    na ≈ 0（全死）时覆盖率为 0。
+    na ≈ 0（全死）时覆盖率为 0。内部恒以 float64 计算（逐光线 1D 小张量，
+    成本可忽略）：覆盖率是 τ 门控的判决依据，值得免费加固。
     """
-    na = _na(tr, sp)  # (P,F,W)
-    cos_i = (tr.dirs * sp.normals).sum(dim=-1).clamp_min(0.0)  # (P,F,W,N)
+    na = _na(tr, sp).double()  # (P,F,W)
+    cos_i = (tr.dirs.double() * sp.normals.double()).sum(dim=-1).clamp_min(0.0)
     w = 0.5 * (1.0 + cos_i)  # 窗心处 cos_d ≡ 1（球面点精确位于参考球上）
     w2 = torch.where(sp.valid, w.square(), torch.zeros_like(w)).sum(dim=-1)
     n_emit = sp.points.shape[3]
     a_half = 0.5 * epd
     a_pupil = torch.pi * a_half**2
-    lam_mm = tr.wavelengths * _NM_TO_MM  # (W,)
-    n_img = tr.n_img[..., 0]  # (P,F,W)：逐格恒定（波长维已分离）
+    lam_mm = tr.wavelengths.double() * _NM_TO_MM  # (W,)
+    n_img = tr.n_img[..., 0].double()  # (P,F,W)：逐格恒定（波长维已分离）
     f_eff = a_half / na.clamp_min(1e-300)  # (P,F,W)
     lam_f2 = (lam_mm.view(1, 1, -1) * f_eff / n_img).square()  # (P,F,W)
     denom = lam_f2 * w2
-    num = raw.sum(dim=(-2, -1)) * (delta**2 * n_emit * a_pupil)
+    num = raw.sum(dim=(-2, -1)).double() * (delta**2 * n_emit * a_pupil)
     ok = (na > 0) & (w2 > 0)
     return torch.where(ok, num / denom.clamp_min(1e-300), torch.zeros_like(num))
 
@@ -290,8 +293,12 @@ def _image(
     size: int,
     pixel_integrate: int,
     chunk_elems: int,
+    dtype: torch.dtype,
 ) -> _Image:
-    """单次直评：网格 Kirchhoff 积分 + Σ=1 归一化 + 覆盖率 + 边缘诊断。"""
+    """单次直评：网格 Kirchhoff 积分 + Σ=1 归一化 + 覆盖率 + 边缘诊断。
+
+    ``dtype`` 为积分器精度（大张量）；网格与追迹量恒为 float64。
+    """
     P, F, W, N = tr.points.shape[:4]
     device = tr.points.device
     H = size
@@ -313,7 +320,7 @@ def _image(
 
     # ── Kirchhoff 直评：U(Q) = Σ_r K·exp(i·k0·(OPD + n_img·|r|)) ──
     k0 = 2.0 * torch.pi / (tr.wavelengths * _NM_TO_MM)  # (W,)
-    raw = integrate(sp, tr.dirs, tr.n_img, Q, k0, chunk_elems)
+    raw = integrate(sp, tr.dirs, tr.n_img, Q, k0, chunk_elems, dtype=dtype)
     raw = raw / float(N) ** 2  # 归一到发射数：峰值 ≈ 吞吐²
     if n_sub > 1:
         raw = raw.view(P, F, W, H, n_sub, H, n_sub).mean(dim=(4, 6))
@@ -381,8 +388,8 @@ def _wavelengths(sub: Sequential, spec: PsfSpec) -> tuple[float, ...] | None:
 def _probe(seq: Sequential, idx: int, spec: PsfSpec) -> _Probe:
     """单结构探测：切片 P=1 → 评估链 → 追迹（含误差注入）→ 参考球。"""
     sub = seq.select(idx)
-    ev = eval_chain(sub, spec.pupil, _wavelengths(sub, spec), spec.field, spec.dtype)
-    tr = trace_with_opl(ev, _extra(ev, spec), spec.dtype)
+    ev = eval_chain(sub, spec.pupil, _wavelengths(sub, spec), spec.field)  # 追迹恒 f64
+    tr = trace_with_opl(ev, _extra(ev, spec))
     sp = reference_sphere(tr)
     return _Probe(
         index=idx,
@@ -409,8 +416,8 @@ def _eval_at(pb: _Probe, spec: PsfSpec, s: float, delta: float) -> _Eval:
         ev, tr, sp, epd = pb.ev, pb.tr, pb.sp, pb.epd
     else:
         scaled = pb.sub.scale(s)
-        ev = eval_chain(scaled, spec.pupil, _wavelengths(scaled, spec), spec.field, spec.dtype)
-        tr = trace_with_opl(ev, _extra(ev, spec), spec.dtype)
+        ev = eval_chain(scaled, spec.pupil, _wavelengths(scaled, spec), spec.field)
+        tr = trace_with_opl(ev, _extra(ev, spec))  # 追迹恒 f64
         sp = reference_sphere(tr)
         epd = cast(InfiniteSource, ev[0]).epd
     img = _image(
@@ -421,6 +428,7 @@ def _eval_at(pb: _Probe, spec: PsfSpec, s: float, delta: float) -> _Eval:
         size=spec.size,
         pixel_integrate=spec.pixel_integrate,
         chunk_elems=spec.chunk_elems,
+        dtype=spec.dtype,
     )
     return _Eval(ev=ev, tr=tr, sp=sp, img=img, scale=s, size=spec.size, issues=[])
 
@@ -435,6 +443,7 @@ def _grow_at(pb: _Probe, spec: PsfSpec, delta: float, size: int) -> _Eval:
         size=size,
         pixel_integrate=spec.pixel_integrate,
         chunk_elems=spec.chunk_elems,
+        dtype=spec.dtype,
     )
     return _Eval(ev=pb.ev, tr=pb.tr, sp=pb.sp, img=img, scale=1.0, size=size, issues=[])
 
@@ -508,7 +517,7 @@ def psf(seq: Sequential, spec: PsfSpec | None = None) -> PsfReport:
     """计算选中结构在指定工况下的 Kirchhoff 单色 PSF（逐波长，网格共享）。
 
     Args:
-        seq: 光学系统（不被修改；逐结构切片克隆评估并转为 ``spec.dtype``）。
+        seq: 光学系统（不被修改；逐结构切片克隆评估，追迹恒 float64）。
         spec: 计算规格（缺省 :class:`PsfSpec` 全部默认值：第 0 个结构、
             轴上视场、内嵌波长、fibonacci 20001、64×64、无阈值）。
     """
@@ -564,6 +573,7 @@ def psf(seq: Sequential, spec: PsfSpec | None = None) -> PsfReport:
                 size=h_final,
                 pixel_integrate=spec.pixel_integrate,
                 chunk_elems=spec.chunk_elems,
+                dtype=spec.dtype,
             )
             st.size = h_final
 

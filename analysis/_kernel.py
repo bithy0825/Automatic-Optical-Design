@@ -53,7 +53,7 @@ class TraceSnapshot:
 
     points: Tensor  # (P,F,W,N,3) 末折射面命中点（全局）
     dirs: Tensor  # (P,F,W,N,3) 末折射面出射方向
-    opl: Tensor  # (P,F,W,N) 快照处累积光程 mm
+    opl: Tensor  # (P,F,W,N) 快照处累积光程 mm（恒 float64，与链精度解耦）
     n_img: Tensor  # (P,F,W,N) 像方折射率（逐光线波长）
     sensor_pts: Tensor  # (P,F,W,N,3) 传感器命中点（全局）
     sensor_tf: Transformer  # 传感器局部坐标系
@@ -122,7 +122,8 @@ def trace_with_opl(
     段介质 = 上游最近 Source/Refractor 的出射材料（折射面处先按旧介质
     累积到达段、再更新介质）；Gap 不移动光线，Stop 在同介质内推进。
     *extra* 为误差注入等附加回调（单个或可迭代；先于 OPL 记账执行，
-    记账只读当前状态）。
+    记账只读当前状态）。快照中 ``points/dirs`` 跟随链精度 ``dtype``，
+    ``opl`` 恒为 float64（见 _cb 注释）。
 
     InfiniteSource 无浮点 buffer，初始 Transformer 取进程缺省 dtype；
     追迹期间临时切换缺省为 ``dtype``（退出还原）。
@@ -139,16 +140,19 @@ def trace_with_opl(
     terminal: dict[str, object] = {}
 
     def _cb(comp, flow: TraceFlow, _i: int) -> TraceFlow:
+        # OPL 记账恒为 float64（与链精度解耦）：段长是长链累积加法，且最终要
+        # 减去主光线 OPL（大数相消），f32 下实测噪声 p95 ≈ 0.6λ@400nm；而 OPL
+        # 只是逐光线 1D 张量，f64 成本占比 <1%，是零成本精度升级。
         pts = flow.rays.points
         if isinstance(comp, InfiniteSource):
             # 发射面：物方折射率 + 无穷远倾斜平面波相位参考（主光线为零）
             n_cur[0] = comp.transmitted(flow.rays.wavelength)
-            opl[0] = (pts * flow.rays.directions).sum(dim=-1) * n_cur[0]
+            opl[0] = (pts * flow.rays.directions).sum(dim=-1).double() * n_cur[0].double()
         else:
             # 到达段：几何长度 × 上游介质折射率（逐光线波长）
             assert opl[0] is not None and prev[0] is not None and n_cur[0] is not None
-            opl[0] = opl[0] + (pts - prev[0]).norm(dim=-1) * n_cur[0]
-        prev[0] = pts
+            opl[0] = opl[0] + (pts.double() - prev[0]).norm(dim=-1) * n_cur[0].double()
+        prev[0] = pts.double()
         if isinstance(comp, Refractor):
             n_cur[0] = comp.transmitted(flow.rays.wavelength)
             snap.update(points=pts, dirs=flow.rays.directions, opl=opl[0].clone(), n=n_cur[0])
@@ -192,12 +196,12 @@ def trace_with_opl(
 class ReferenceSphere:
     """参考球：球面点、内法向、球面 OPD、有效掩码、球心与半径。"""
 
-    points: Tensor  # (P,F,W,N,3) 球面交点（全局）
-    normals: Tensor  # (P,F,W,N,3) 指向球心的单位内法向
-    opd: Tensor  # (P,F,W,N) 球面光程差 mm（主光线为零点，无效 nan）
+    points: Tensor  # (P,F,W,N,3) 球面交点（全局，链精度）
+    normals: Tensor  # (P,F,W,N,3) 指向球心的单位内法向（链精度）
+    opd: Tensor  # (P,F,W,N) 球面光程差 mm（主光线为零点，无效 nan；恒 float64）
     valid: Tensor  # (P,F,W,N) 参与积分掩码
-    centers_g: Tensor  # (P,F,W,3) 球心 = 主光线像点（全局）
-    radius: Tensor  # (P,F,W) 球半径 mm
+    centers_g: Tensor  # (P,F,W,3) 球心 = 主光线像点（全局，链精度）
+    radius: Tensor  # (P,F,W) 球半径 mm（链精度）
 
 
 def reference_sphere(tr: TraceSnapshot) -> ReferenceSphere:
@@ -206,14 +210,24 @@ def reference_sphere(tr: TraceSnapshot) -> ReferenceSphere:
     出瞳 z = 末面后主光线与光轴的最近交点；病态（轴上视场）回退同 (p,w)
     其他视场中位数，全部病态再回退主光线末面点。精确距离核下 R 的小误差
     只影响采样经济性，不影响核的正确性。
-    """
-    chief_alive = tr.alive[..., 0]  # (P,F,W)
-    w = tr.alive.unsqueeze(-1).to(tr.sensor_pts.dtype)
-    centroid = (tr.sensor_pts * w).sum(dim=-2) / w.sum(dim=-2).clamp_min(1.0)
-    # 主光线死亡 → 存活质心兜底（仅影响中心定义；活塞相位不影响强度）
-    centers_g = torch.where(chief_alive.unsqueeze(-1), tr.sensor_pts[..., 0, :], centroid)
 
-    c0, d0 = tr.points[..., 0, :], tr.dirs[..., 0, :]  # (P,F,W,3) 主光线
+    内部计算恒为 float64（一次性小张量，成本可忽略）：光线-球求交的
+    ``t = −b − √disc`` 在擦边光线下有 sqrt 抵消，f32 投影会额外引入
+    ~0.1mm 的球面点误差。输出坐标量转回链精度（喂给积分器大张先生），
+    ``opd`` 保持 float64（逐光线 1D，直入积分器的 f64 常量相位，不再
+    二次量化）。注意：这只消除投影自身引入的误差，追迹几何本身的
+    f32 噪声不受影响。
+    """
+    dt = tr.points.dtype  # 链精度（输出坐标量转回）
+    sensor_pts = tr.sensor_pts.double()
+    pts64, dirs64 = tr.points.double(), tr.dirs.double()
+    chief_alive = tr.alive[..., 0]  # (P,F,W)
+    w = tr.alive.unsqueeze(-1).to(sensor_pts.dtype)
+    centroid = (sensor_pts * w).sum(dim=-2) / w.sum(dim=-2).clamp_min(1.0)
+    # 主光线死亡 → 存活质心兜底（仅影响中心定义；活塞相位不影响强度）
+    centers_g = torch.where(chief_alive.unsqueeze(-1), sensor_pts[..., 0, :], centroid)
+
+    c0, d0 = pts64[..., 0, :], dirs64[..., 0, :]  # (P,F,W,3) 主光线
     dxy2 = d0[..., :2].square().sum(dim=-1)
     ok = dxy2 > 1e-12
     t_star = -(c0[..., :2] * d0[..., :2]).sum(dim=-1) / dxy2.clamp_min(1e-300)
@@ -226,18 +240,20 @@ def reference_sphere(tr: TraceSnapshot) -> ReferenceSphere:
     radius = (centers_g - ep).norm(dim=-1).clamp_min(1e-9)
 
     # 光线-球解析求交：|X + t·d − C|² = R²，取前方根（朝球心会聚的一侧）
-    m = tr.points - centers_g.unsqueeze(-2)  # (P,F,W,N,3)
-    b = (tr.dirs * m).sum(dim=-1)  # (P,F,W,N)
+    m = pts64 - centers_g.unsqueeze(-2)  # (P,F,W,N,3)
+    b = (dirs64 * m).sum(dim=-1)  # (P,F,W,N)
     disc = b.square() - m.square().sum(dim=-1) + radius.unsqueeze(-1).square()
     hit = disc > 0
     t = -b - disc.clamp_min(0).sqrt()
-    points = tr.points + t.unsqueeze(-1) * tr.dirs
-    opl = tr.opl + t * tr.n_img
+    points = pts64 + t.unsqueeze(-1) * dirs64
+    opl = tr.opl + t * tr.n_img.double()  # tr.opl 恒 f64（trace_with_opl 记账）
     opd = opl - opl[..., :1]  # 主光线（N=0）为零点
     normals = (centers_g.unsqueeze(-2) - points) / radius.unsqueeze(-1).unsqueeze(-1)
     valid = tr.alive & hit
     opd = torch.where(valid, opd, torch.full_like(opd, float("nan")))
-    return ReferenceSphere(points, normals, opd, valid, centers_g, radius)
+    return ReferenceSphere(
+        points.to(dt), normals.to(dt), opd, valid, centers_g.to(dt), radius.to(dt)
+    )
 
 
 def _integrate_block(
@@ -297,6 +313,7 @@ def integrate(
     Q: Tensor,
     k0: Tensor,
     chunk_elems: int,
+    dtype: torch.dtype | None = None,
 ) -> Tensor:
     """Kirchhoff 积分：``U(Q) = Σ_r K·(R/|r|)·exp(i·k0·(OPD + n_img·|r|))``。
 
@@ -310,9 +327,13 @@ def integrate(
         Q: 采样点全局坐标 ``(P,F,H,H,3)``——逐 (P,F) 一个网格，波长共享。
         k0: 逐波数 ``(W,)``（2π/λ，mm⁻¹）。
         chunk_elems: 单步张量元素预算（控制内存峰值）。
+        dtype: 积分计算精度（大张量部分）。``None`` → 跟随 ``sp.points.dtype``。
+            逐光线常量与相位分裂准备恒为 float64（小张量，免费）；逐像素
+            大张量按此精度。管线用法：追迹 f64 + 积分 f32（追迹耗时为延迟
+            主导，f64 零成本；积分才是 FP 速率瓶颈）。
 
     Returns:
-        未归一化的 ``|U|²``，形状 ``(P,F,W,H,H)``。无效光线贡献精确的 0。
+        未归一化的 ``|U|²``，形状 ``(P,F,W,H,H)``，精度为 ``dtype``。无效光线贡献精确的 0。
 
     实现要点（性能重写 + float32 相位分裂，数学不变）：
 
@@ -337,44 +358,44 @@ def integrate(
     P, F, W, N = sp.points.shape[:4]
     H = Q.shape[2]
     device = sp.points.device
-    dtype = sp.points.dtype  # 跟随评估链精度（PsfSpec.dtype）
-    psf = torch.zeros(P, F, W, H, H, device=device, dtype=dtype)
+    dt = dtype if dtype is not None else sp.points.dtype  # 积分精度（大张量）
+    psf = torch.zeros(P, F, W, H, H, device=device, dtype=dt)
     FW = F * W
     chunk = max(1, chunk_elems // (FW * H * H))
-    k0fw = k0.repeat(F)  # (FW,)：fw = f·W + w，与 reshape(FW,…) 同序
+    k0fw64 = k0.double().repeat(F)  # (FW,)：fw = f·W + w，与 reshape(FW,…) 同序
     two_pi = 2.0 * torch.pi
     for p in range(P):
         valid = sp.valid[p].reshape(FW, N)
         v3 = valid.unsqueeze(-1)
-        S = torch.where(v3, sp.points[p].reshape(FW, N, 3), 0.0)
-        nrm = torch.where(v3, sp.normals[p].reshape(FW, N, 3), 0.0)
-        d = torch.where(v3, dirs[p].reshape(FW, N, 3), 0.0)
-        opd = torch.where(valid, sp.opd[p].reshape(FW, N), 0.0)  # mm（未乘 k0）
-        n_im = torch.where(valid, n_img[p].reshape(FW, N), 1.0)  # 折射率（未乘 k0）
+        # 逐光线准备恒为 float64（小张量）；仅送入分块主循环的量转 dt
+        S = torch.where(v3, sp.points[p].reshape(FW, N, 3).double(), 0.0)
+        nrm64 = torch.where(v3, sp.normals[p].reshape(FW, N, 3).double(), 0.0)
+        d = torch.where(v3, dirs[p].reshape(FW, N, 3).double(), 0.0)
+        opd = torch.where(valid, sp.opd[p].reshape(FW, N), 0.0)  # 已 f64（mm，未乘 k0）
+        n_im = torch.where(valid, n_img[p].reshape(FW, N).double(), 1.0)  # 折射率
         # 倾斜因子权重 w = valid·R/2（R = 参考球半径，1/ρ 振幅的保标度参考）
-        w_ray = torch.where(valid, 0.5 * sp.radius[p].reshape(FW, 1), 0.0)
-        sn = (S * nrm).sum(-1)  # (FW,N)
-        cos_i = (d * nrm).sum(-1)  # (FW,N)
-        Qf = Q[p].unsqueeze(1).expand(F, W, H, H, 3).reshape(FW, H * H, 3)
+        w_ray = torch.where(valid, 0.5 * sp.radius[p].reshape(FW, 1).double(), 0.0).to(dt)
+        sn = (S * nrm64).sum(-1)  # (FW,N)
+        cos_i = (d * nrm64).sum(-1).to(dt)  # (FW,N)
+        nrm = nrm64.to(dt)
+        Qf = Q[p].unsqueeze(1).expand(F, W, H, H, 3).reshape(FW, H * H, 3).double()
 
         # ── 相位分裂的逐光线/逐像素准备 ──
         C = Qf.mean(dim=1)  # (FW,3) 对称网格均值 = 窗心（任意参考点数学上等价）
-        q = Qf - C.unsqueeze(1)  # (FW,HH,3) 像素局部坐标（小量）
+        q = (Qf - C.unsqueeze(1)).to(dt)  # (FW,HH,3) 像素局部坐标（小量）
         qq = (q * q).sum(-1)  # (FW,HH) |q|²
         # 逐光线常量：float64 精确求值并 mod 2π（(FW,N) 小张量，一次性）
-        E64 = C.double().unsqueeze(1) - S.double()  # (FW,N,3) 窗心→球面点
+        E64 = C.unsqueeze(1) - S  # (FW,N,3) 窗心→球面点
         D64 = E64.norm(dim=-1)  # (FW,N)
-        const = torch.remainder(
-            (opd.double() + n_im.double() * D64) * k0fw.double().unsqueeze(-1), two_pi
-        )
-        cre, cim = const.cos().to(dtype), const.sin().to(dtype)  # (FW,N) 旋转因子
-        E = E64.to(dtype)  # (FW,N,3)
-        Df = D64.to(dtype)  # (FW,N)
+        const = torch.remainder((opd + n_im * D64) * k0fw64.unsqueeze(-1), two_pi)
+        cre, cim = const.cos().to(dt), const.sin().to(dt)  # (FW,N) 旋转因子
+        E = E64.to(dt)  # (FW,N,3)
+        Df = D64.to(dt)  # (FW,N)
         Df2 = Df * Df
-        nk = n_im * k0fw.unsqueeze(-1)  # (FW,N) 增量的 n·k0
-        cnq = torch.einsum("fc,fnc->fn", C, nrm) - sn  # (FW,N) 窗心处 (Q·n̂−S·n̂)
+        nk = (n_im * k0fw64.unsqueeze(-1)).to(dt)  # (FW,N) 增量的 n·k0
+        cnq = (torch.einsum("fc,fnc->fn", C, nrm64) - sn).to(dt)  # 窗心 (Q·n̂−S·n̂)
 
-        amp_re = torch.zeros(FW, H * H, device=device, dtype=dtype)
+        amp_re = torch.zeros(FW, H * H, device=device, dtype=dt)
         amp_im = torch.zeros_like(amp_re)
         fn = _compiled_block(device)
         # 编译路径把块宽提到 ≥1024（启动开销摊薄），显存安全上限 1.5G 元素
