@@ -306,7 +306,7 @@ def _compiled_block(device: torch.device):
     return _BLOCK_CACHE["fn"]
 
 
-def integrate(
+def integrate_points(
     sp: ReferenceSphere,
     dirs: Tensor,
     n_img: Tensor,
@@ -324,7 +324,7 @@ def integrate(
         sp: 参考球状态（``(P,F,W,N,...)``）。
         dirs: 末折射面出射方向 ``(P,F,W,N,3)``。
         n_img: 像方折射率 ``(P,F,W,N)``。
-        Q: 采样点全局坐标 ``(P,F,H,H,3)``——逐 (P,F) 一个网格，波长共享。
+        Q: 任意采样点全局坐标 ``(P,F,M,3)``——逐 (P,F) 一组点，波长共享。
         k0: 逐波数 ``(W,)``（2π/λ，mm⁻¹）。
         chunk_elems: 单步张量元素预算（控制内存峰值）。
         dtype: 积分计算精度（大张量部分）。``None`` → 跟随 ``sp.points.dtype``。
@@ -333,7 +333,7 @@ def integrate(
             主导，f64 零成本；积分才是 FP 速率瓶颈）。
 
     Returns:
-        未归一化的 ``|U|²``，形状 ``(P,F,W,H,H)``，精度为 ``dtype``。无效光线贡献精确的 0。
+        未归一化的 ``|U|²``，形状 ``(P,F,W,M)``，精度为 ``dtype``。无效光线贡献精确的 0。
 
     实现要点（性能重写 + float32 相位分裂，数学不变）：
 
@@ -356,12 +356,16 @@ def integrate(
       N=65536·W=33·64²）；编译失败自动回退 eager（数学相同，仅慢）。
     """
     P, F, W, N = sp.points.shape[:4]
-    H = Q.shape[2]
+    if Q.ndim != 4 or Q.shape[:2] != (P, F) or Q.shape[-1] != 3:
+        raise ValueError(f"Q must have shape ({P},{F},M,3), got {tuple(Q.shape)}")
+    M = Q.shape[2]
+    if M < 1:
+        raise ValueError("Q must contain at least one image point")
     device = sp.points.device
     dt = dtype if dtype is not None else sp.points.dtype  # 积分精度（大张量）
-    psf = torch.zeros(P, F, W, H, H, device=device, dtype=dt)
+    psf = torch.zeros(P, F, W, M, device=device, dtype=dt)
     FW = F * W
-    chunk = max(1, chunk_elems // (FW * H * H))
+    chunk = max(1, chunk_elems // (FW * M))
     k0fw64 = k0.double().repeat(F)  # (FW,)：fw = f·W + w，与 reshape(FW,…) 同序
     two_pi = 2.0 * torch.pi
     for p in range(P):
@@ -378,7 +382,7 @@ def integrate(
         sn = (S * nrm64).sum(-1)  # (FW,N)
         cos_i = (d * nrm64).sum(-1).to(dt)  # (FW,N)
         nrm = nrm64.to(dt)
-        Qf = Q[p].unsqueeze(1).expand(F, W, H, H, 3).reshape(FW, H * H, 3).double()
+        Qf = Q[p].unsqueeze(1).expand(F, W, M, 3).reshape(FW, M, 3).double()
 
         # ── 相位分裂的逐光线/逐像素准备 ──
         C = Qf.mean(dim=1)  # (FW,3) 对称网格均值 = 窗心（任意参考点数学上等价）
@@ -395,12 +399,16 @@ def integrate(
         nk = (n_im * k0fw64.unsqueeze(-1)).to(dt)  # (FW,N) 增量的 n·k0
         cnq = (torch.einsum("fc,fnc->fn", C, nrm64) - sn).to(dt)  # 窗心 (Q·n̂−S·n̂)
 
-        amp_re = torch.zeros(FW, H * H, device=device, dtype=dt)
+        amp_re = torch.zeros(FW, M, device=device, dtype=dt)
         amp_im = torch.zeros_like(amp_re)
         fn = _compiled_block(device)
-        # 编译路径把块宽提到 ≥1024（启动开销摊薄），显存安全上限 1.5G 元素
+        # 编译路径把块宽提到 ≥1024（启动开销摊薄）。极坐标 M 远大于
+        # 方形网格：f32 保留旧版 1.5G 元素上限以避免性能回退；f64
+        # 单元素双倍且寄存器/临时量压力更高，改用更保守上限，防止
+        # 16GB 显卡在 W×M 很大时溢出。普通网格块宽不变。
         if fn is not _integrate_block:
-            chunk = min(max(chunk, 1024), max(1, 1_500_000_000 // (FW * H * H)))
+            element_cap = 128_000_000 if dt == torch.float64 else 1_500_000_000
+            chunk = min(max(chunk, 1024), max(1, element_cap // (FW * M)))
         for s in range(0, N, chunk):
             sl = slice(s, s + chunk)
             args = (
@@ -428,5 +436,27 @@ def integrate(
                 re, im = fn(*args)
             amp_re += re
             amp_im += im
-        psf[p] = (amp_re.square() + amp_im.square()).view(F, W, H, H)
+        psf[p] = amp_re.square() + amp_im.square()
     return psf
+
+
+def integrate(
+    sp: ReferenceSphere,
+    dirs: Tensor,
+    n_img: Tensor,
+    Q: Tensor,
+    k0: Tensor,
+    chunk_elems: int,
+    dtype: torch.dtype | None = None,
+) -> Tensor:
+    """方形网格兼容接口；数学与求值顺序均委托 :func:`integrate_points`。
+
+    ``Q`` 为 ``(P,F,H,H,3)``，返回 ``(P,F,W,H,H)``。旧管线无需修改。
+    """
+
+    if Q.ndim != 5 or Q.shape[-2] != Q.shape[-3] or Q.shape[-1] != 3:
+        raise ValueError(f"Q must have shape (P,F,H,H,3), got {tuple(Q.shape)}")
+    P, F, H = Q.shape[:3]
+    flat = Q.reshape(P, F, H * H, 3)
+    values = integrate_points(sp, dirs, n_img, flat, k0, chunk_elems, dtype=dtype)
+    return values.view(P, F, sp.points.shape[2], H, H)
