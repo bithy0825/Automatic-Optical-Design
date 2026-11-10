@@ -145,6 +145,26 @@ def _grid_coordinates(size: int, delta: float, device: torch.device):
 
 
 @torch.no_grad()
+def polar_coefficients(raw: Tensor) -> Tensor:
+    """从 ``(W,Nr,Q)`` polar raw 重建完整 complex128 角向系数。
+
+    磁盘只需保存 raw；这里的 FFT 是确定性的线性变换，不会引入新的
+    光学近似。Q 必须为奇数，与 :class:`PolarPsfSpec` 的约定一致。
+    """
+
+    if raw.ndim != 3 or raw.shape[0] < 1 or raw.shape[1] < 1:
+        raise ValueError(f"polar raw must have shape (W,Nr,Q), got {tuple(raw.shape)}")
+    if not raw.is_floating_point() or raw.is_complex():
+        raise TypeError(f"polar raw must be a real floating tensor, got {raw.dtype}")
+    nq = raw.shape[-1]
+    if nq < 9 or nq % 2 == 0:
+        raise ValueError(f"polar angular sample count must be odd and >=9, got {nq}")
+    if not torch.isfinite(raw).all():
+        raise ValueError("polar raw contains NaN/Inf")
+    return torch.fft.fft(raw.to(torch.float64), dim=-1) / nq
+
+
+@torch.no_grad()
 def psf_polar(seq: Sequential, spec: PolarPsfSpec | None = None) -> PolarPsfReport:
     """直接计算 ``phi=0`` 基准视场的多波长极坐标 raw PSF。"""
 
@@ -210,7 +230,7 @@ def psf_polar(seq: Sequential, spec: PolarPsfSpec | None = None) -> PolarPsfRepo
         raise RuntimeError("polar raw PSF contains NaN/Inf")
 
     # 完整角向变换；旋转和 Cartesian 合成统一使用 f64/complex128。
-    coefficients = torch.fft.fft(raw.to(torch.float64), dim=-1) / nq
+    coefficients = polar_coefficients(raw)
     report = PolarPsfReport(
         raw=raw,
         coefficients=coefficients,
@@ -242,6 +262,62 @@ def psf_polar(seq: Sequential, spec: PolarPsfSpec | None = None) -> PolarPsfRepo
     return report
 
 
+def _render_polar_coefficients(
+    coefficients: Tensor,
+    center_raw: Tensor,
+    radius_index: Tensor,
+    alpha: Tensor,
+    phi_deg: float | Sequence[float],
+) -> Tensor:
+    """完整角向系数 → 任意方位角 Cartesian raw 的共享实现。"""
+
+    if radius_index.ndim != 2 or radius_index.shape != alpha.shape:
+        raise ValueError("radius_index and alpha must have the same (H,H) shape")
+    device = coefficients.device
+    phis = torch.as_tensor(phi_deg, dtype=torch.float64, device=device)
+    scalar = phis.ndim == 0
+    if scalar:
+        phis = phis[None]
+    if phis.ndim != 1 or phis.numel() == 0 or not torch.isfinite(phis).all():
+        raise ValueError("phi_deg must be a finite scalar or non-empty 1D sequence")
+
+    nq = coefficients.shape[-1]
+    frequency = torch.arange(nq, device=device, dtype=torch.float64)
+    frequency[frequency > nq // 2] -= nq
+    outputs = []
+    for phi in torch.deg2rad(phis):
+        angle = (alpha - phi).unsqueeze(-1) * frequency
+        basis = torch.exp(torch.complex(torch.zeros_like(angle), angle))
+        values = (coefficients[:, radius_index] * basis.unsqueeze(0)).sum(dim=-1).real
+        # r=0 的所有角向节点是同一物理点，直接保留其 raw 值。
+        values[:, radius_index == 0] = center_raw.double().unsqueeze(-1)
+        outputs.append(values)
+    result = torch.stack(outputs)
+    return result[0] if scalar else result
+
+
+@torch.no_grad()
+def render_polar_raw(
+    polar_raw: Tensor,
+    radius_index: Tensor,
+    alpha: Tensor,
+    phi_deg: float | Sequence[float],
+) -> Tensor:
+    """直接从紧凑保存的 polar raw 合成任意方位角 Cartesian raw。
+
+    ``polar_raw`` 为 ``(W,Nr,Q)``；FFT 系数只在内存中临时重建为
+    complex128，不需要写入磁盘。返回值不归一化、不截断。
+    """
+
+    return _render_polar_coefficients(
+        polar_coefficients(polar_raw),
+        polar_raw[:, 0, 0],
+        radius_index,
+        alpha,
+        phi_deg,
+    )
+
+
 @torch.no_grad()
 def render_polar_psf(
     report: PolarPsfReport, phi_deg: float | Sequence[float]
@@ -252,27 +328,10 @@ def render_polar_psf(
     所有输出点使用提取时的相同半径节点，仅做完整 Fourier 相位合成。
     """
 
-    device = report.coefficients.device
-    phis = torch.as_tensor(phi_deg, dtype=torch.float64, device=device)
-    scalar = phis.ndim == 0
-    if scalar:
-        phis = phis[None]
-    if phis.ndim != 1 or phis.numel() == 0 or not torch.isfinite(phis).all():
-        raise ValueError("phi_deg must be a finite scalar or non-empty 1D sequence")
-
-    nq = report.coefficients.shape[-1]
-    frequency = torch.arange(nq, device=device, dtype=torch.float64)
-    frequency[frequency > nq // 2] -= nq
-    alpha = report.alpha
-    outputs = []
-    for phi in torch.deg2rad(phis):
-        angle = (alpha - phi).unsqueeze(-1) * frequency
-        basis = torch.exp(torch.complex(torch.zeros_like(angle), angle))
-        values = (
-            report.coefficients[:, report.radius_index] * basis.unsqueeze(0)
-        ).sum(dim=-1).real
-        # r=0 的所有角向节点是同一物理点，直接保留其 raw 值。
-        values[:, report.radius_index == 0] = report.raw[:, 0, 0].double().unsqueeze(-1)
-        outputs.append(values)
-    result = torch.stack(outputs)
-    return result[0] if scalar else result
+    return _render_polar_coefficients(
+        report.coefficients,
+        report.raw[:, 0, 0],
+        report.radius_index,
+        report.alpha,
+        phi_deg,
+    )

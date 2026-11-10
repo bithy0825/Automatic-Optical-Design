@@ -15,8 +15,10 @@ from analysis.polar import (
     PolarPsfReport,
     PolarPsfSpec,
     field_from_polar,
+    polar_coefficients,
     psf_polar,
     render_polar_psf,
+    render_polar_raw,
 )
 from analysis.psf import Issue, PsfReport, PsfSpec, psf, psf_from_checkpoint
 
@@ -30,10 +32,12 @@ __all__ = [
     "WavefrontResult",
     "field_from_polar",
     "mtf",
+    "polar_coefficients",
     "psf",
     "psf_from_checkpoint",
     "psf_polar",
     "render_polar_psf",
+    "render_polar_raw",
     "strehl",
     "wavefront",
 ]
