@@ -436,7 +436,7 @@ def integrate_points(
                 re, im = fn(*args)
             amp_re += re
             amp_im += im
-        psf[p] = amp_re.square() + amp_im.square()
+        psf[p] = (amp_re.square() + amp_im.square()).view(F, W, M)
     return psf
 
 
