@@ -166,7 +166,7 @@ def sample_scales(
     s_diffraction: float,
     m: int,
     n: int,
-    ratio: float = math.sqrt(2.0),
+    ratio: float = 1.732,
     jitter: float = 0.2,
     seed: int = 0,
 ) -> tuple[float, ...]:
@@ -570,7 +570,7 @@ def extract_lens(
     n_fields: int = 64,
     m: int = 1,
     n: int = 5,
-    ratio: float = math.sqrt(2.0),
+    ratio: float = 1.732,
     jitter: float = 0.2,
     seed: int = 0,
     wavelengths: Iterable[float] | None = None,
@@ -776,7 +776,7 @@ def main() -> None:
     parser.add_argument("--n-fields", type=int, default=64)
     parser.add_argument("--m", type=int, default=1, help="小于衍射 scale 的档位数")
     parser.add_argument("--n", type=int, default=5, help="大于衍射 scale 的档位数")
-    parser.add_argument("--ratio", type=float, default=math.sqrt(2.0))
+    parser.add_argument("--ratio", type=float, default=1.732)
     parser.add_argument("--jitter", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wavelengths", type=float, nargs="*", default=None)
